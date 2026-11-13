@@ -1,0 +1,94 @@
+{
+  // 平台基线：只放项目可覆写的默认值。CI 自身布局常量 / action pin / SDK 脚本名 / 固定 secret 名不在此（留 CI 代码）。
+  //
+  // 结构按维度分层，每段只承担一种语义：
+  //   platforms  = 权威平台清单，每平台的全部平台级配置集中一处（runner / 导出形态 / 变体）
+  //   roles      = 链级作业的 runner（不随平台变化，故与平台分开）
+  //   toolchain  = 工具链版本号（纯标量，契约 build.toolchain 按同名键覆写）
+  //   compat     = 兼容层规则
+  // 契约 platforms 段可按同名键逐字段覆写（深合并），toolchain 段同理。
+
+  "platforms": {
+    // 每平台字段：
+    //   build_runner     构建链该平台作业用的 runner 标签
+    //   export_runner    导出链该平台作业用的 runner 标签（默认与构建机同源，可为不同值）
+    //   editor_archive   导出时下载的官方编辑器档案后缀（交叉导出时可用别的平台档案）
+    //   variants         该平台的构建变体（编译选项 + 产物名末段），无变体则省略
+    "linux": {
+      // 锁 22.04：构建机 glibc 决定产物最低运行环境（22.04 = glibc 2.35）。
+      // 兼容性方向是单向的——老机器构建的产物能在新机器跑，反之会因引用新 glibc
+      // 符号（如 GLIBC_2.39）在老系统上直接找不到符号。但这不是「越老越好」：
+      // 再退会撞上工具链要求（SCons 4.4 需 Python 3.9+）与镜像退役，属有边界的权衡。
+      "build_runner": "ubuntu-22.04",
+      "export_runner": "ubuntu-22.04",
+      "editor_archive": "linux.x86_64"
+    },
+    "windows": {
+      "build_runner": "windows-2022", // 锁 2022：与 Godot 官方 VS2022 工具链一致（windows-latest 已迁 2025）
+      "export_runner": "ubuntu-22.04", // 默认 Linux 交叉导出；需 Authenticode 签名时改 "windows-2022"
+      "editor_archive": "linux.x86_64" // 交叉导出用 Linux 编辑器；改原生时用 "win64.exe"
+    },
+    "macos": {
+      "build_runner": "macos-26",
+      "export_runner": "ubuntu-22.04", // 默认 Linux 交叉导出；需 codesign / 公证时改 "macos-26"
+      "editor_archive": "linux.x86_64"
+    },
+    "android": {
+      "build_runner": "ubuntu-22.04", // 一致性：APK/AAR 不含 glibc 依赖，与 linux 构建机统一减少环境变量
+      "export_runner": "ubuntu-22.04",
+      "editor_archive": "linux.x86_64"
+    },
+    "web": {
+      "build_runner": "ubuntu-22.04", // 一致性：wasm 产物与宿主 glibc 无关，与 linux 构建机统一减少环境变量
+      "export_runner": "ubuntu-22.04",
+      "editor_archive": "linux.x86_64",
+      // 两个变体都用 wasm32：wasm64 仅在编译期被接受、产物不可用（Godot 官方已 revert
+      // 启用提交，godot-cpp 硬性只允许 wasm32，feature tag 亦标注 wasm64 尚不可能）。
+      // 变体维度由 threads 区分，不是架构。
+      "variants": [
+        { "variant": "threads", "scons_flags": "threads=yes arch=wasm32" },
+        { "variant": "nothreads", "scons_flags": "threads=no arch=wasm32" }
+      ]
+    },
+    // Apple 平台的导出器依赖 macOS 工具链（codesign / xcrun），故导出必然是原生
+    "ios": {
+      "build_runner": "macos-26",
+      "export_runner": "macos-26",
+      "editor_archive": "macos.universal"
+    },
+    "visionos": {
+      "build_runner": "macos-26", // visionOS SDK 要求
+      "export_runner": "macos-26",
+      "editor_archive": "macos.universal"
+    }
+  },
+
+  "roles": {
+    // 链级作业的 runner：与具体平台无关的操作（解析 / 发布 / 打包上传）。
+    // 三者都不产出受宿主环境影响的二进制（resolve 只解析、publish 只上传附件、
+    // upload 只把别的平台编好的产物打包成 zip），故统一用 github 维护的稳定镜像，
+    // 不承担镜像退役的跟进成本。
+    // resolve 键结构性不可覆写——其分配先于契约可读（见 workflows/runner.yml）。
+    "resolve": "ubuntu-latest",
+    "publish": "ubuntu-latest",
+    "upload": "ubuntu-latest"
+  },
+
+  "toolchain": {
+    // 工具链版本号（契约 build.toolchain 可按同名键覆写）
+    "emsdk": "4.0.11", // web 平台 Emscripten 版本
+    "java": "17", // android 平台 JDK 版本
+    "scons": "4.11.0" // 构建驱动 SCons 版本（setup-scons 安装）
+  },
+
+  "compat": {
+    "standard_includes": {
+      // 兼容层开关：auto 档的底值（on/off，非 auto），未命中 skip 规则时取此值，命中规则恒关闭（规则单向）。
+      // CI 维护者按引擎版本演进全局调整，契约写 auto 即跟随本值。
+      "default": "on",
+      "skip_rules": [
+        // 条目字段：engine_ref(fnmatch 通配, 必填) / toolchain(点号路径=期望值, 可选, 空对象=不比对) / platform(可选, 单值)
+      ]
+    }
+  }
+}

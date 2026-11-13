@@ -1,0 +1,56 @@
+name: 保存缓存
+description: 保存 SCons 编译缓存。键与恢复侧同源，保证精确命中。
+
+inputs:
+  cache-key:
+    description: 缓存键前缀（平台_target[_arch]，不含仓库名）。
+    default: ""
+  engine-sha:
+    description: 引擎 ref 解析出的 commit SHA。
+    default: ""
+  config-hash:
+    description: 配置文件摘要（profile/build-profile/模块/scons-flags/密钥/plan/hook 输出）。
+    default: ""
+  source-hash:
+    description: 源码层摘要（cache_impact=source 的钩子输出进入此段；空转时用常量）。
+    default: ""
+  hooks-sha:
+    description: 扩展包摘要（空=未启用，省略第 5 段）。
+    default: ""
+  post-build:
+    description: >-
+      hooks-result.json 的 post_build 值（ok|fail）。空（未启用扩展 / 无该字段）视为通过；
+      只有明确的 fail 才拒绝保存缓存。
+    default: ""
+  scons-cache:
+    description: SCons 缓存路径。
+    default: ${{ github.workspace }}/.scons_cache/
+
+runs:
+  using: composite
+  steps:
+    - name: 清理过期缓存
+      shell: bash
+      env:
+        CACHE_TS: ${{ env.CACHE_TIMESTAMP }}
+        INPUT_SCONS_CACHE: ${{ inputs.scons-cache }}
+      run: |
+        # restore 带 continue-on-error 失败时不写 GITHUB_ENV，此处兜底
+        TS="$CACHE_TS"
+        [ -n "$TS" ] || TS=$(date +%s)
+        if [ -f misc/scripts/purge_cache.py ]; then
+          misc/scripts/purge_cache.py "$TS" "$INPUT_SCONS_CACHE"
+        else
+          echo "::warning::该引擎源码中未找到 purge_cache.py，跳过缓存清理。"
+        fi
+
+    # key 必须与 restore 侧同步加段、段序一致（5 段），否则永不精确命中。
+    # hooks-sha 为空时不加第 5 段，仍保存缓存。
+    # 门控判据在此定义：只有明确的 post-build=fail 才拒绝保存，空值（未启用扩展 /
+    # 上游没给）一律视为通过——上游不必在自己那头拼 '|| ok' 这类兜底常量。
+    - name: 保存 SCons 缓存
+      if: inputs.hooks-sha == '' || inputs.post-build != 'fail'
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ inputs.scons-cache }}
+        key: ${{ inputs.cache-key }}|${{ inputs.engine-sha }}|${{ inputs.config-hash }}|${{ inputs.source-hash }}${{ inputs.hooks-sha != '' && format('|{0}', inputs.hooks-sha) || '' }}

@@ -1,0 +1,44 @@
+name: 打包并上传编译产物
+description: 把 bin/ 打成 7z 并上传 Artifact（6 个平台构建 workflow 共用）。
+
+inputs:
+  artifact-name:
+    description: 产物名（prepare-build 渲染并写入 env.ARTIFACT）。
+    required: true
+    type: string
+  retention-days:
+    description: 产物保留天数。
+    required: false
+    default: "7"
+    type: string
+  clean-extra:
+    description: 打包前额外清理的目录（空格分隔，可为空）。
+    required: false
+    default: ""
+    type: string
+  enabled:
+    description: 是否打包上传（调用方传 inputs.upload-artifacts）。
+    required: false
+    default: true
+    type: boolean
+
+runs:
+  using: composite
+  steps:
+    - name: 打包产物
+      if: inputs.enabled
+      shell: bash
+      env:
+        INPUT_ARTIFACT: ${{ inputs.artifact-name }}
+        INPUT_CLEAN_EXTRA: ${{ inputs.clean-extra }}
+      run: |
+        rm -rf ./bin/build_deps $INPUT_CLEAN_EXTRA
+        (cd bin && 7z a -mx=9 "../$INPUT_ARTIFACT.7z" .)
+
+    - name: 上传产物
+      if: inputs.enabled
+      uses: ./ci-support/.github/actions/artifact-upload
+      with:
+        artifact-name: ${{ inputs.artifact-name }}
+        artifact-path: ${{ inputs.artifact-name }}.7z
+        retention-days: ${{ inputs.retention-days }}

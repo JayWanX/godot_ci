@@ -1,0 +1,17 @@
+# 模板：复制到项目仓库 .github/workflows/export.yml（布局同本目录，无需重命名）。
+# 复制后零必改；锁版本 / CI 仓库搬家的变更点见 .github/CI-USAGE.md。
+# 自有项目构建：项目仓库导出自己，产物 Artifact 落在项目仓库。
+name: 📦 Project Export
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    uses: JayWanX/godot_ci/.github/workflows/export.yml@main
+    with:
+      caller-uses-ref: main # 与上面 uses:@main 同值
+    secrets: inherit # 映射写法见 build.yml 模板

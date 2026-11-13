@@ -1,0 +1,96 @@
+name: 📚 Trigger Template Release
+
+# - push 到 main 且 .github/templates/** 变更 → 发布到固定 Release「templates-latest」（--clobber 覆盖），
+# - 推送 v* Tag → 发布到该 Tag 的版本化 Release（锁版本 / 里程碑）。
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/templates/**"
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 要发布到 Release 的 Tag。留空则取触发本次运行的 Tag。
+        required: false
+        default: ""
+        type: string
+      draft:
+        description: Release 不存在时，创建为草稿（不公开发布）。
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write # 创建 / 上传 Release 到本仓库
+
+concurrency:
+  group: template-release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # 基线 runner 仲裁（workflows/runner.yml）：runs-on 不得写字面量，
+  # 纯文件操作复用 roles.publish 的 runner（与项目 Release 的发布作业同源）。
+  runner:
+    name: 引导链式运行器
+    uses: $/.github/workflows/runner.yml
+    secrets:
+      GIT_PAT: ${{ secrets.GIT_PAT }}
+
+  publish:
+    name: 打包并发布模板
+    needs: runner
+    runs-on: ${{ fromJSON(needs.runner.outputs.runner-json).publish }}
+    timeout-minutes: 10
+    steps:
+      - name: 检出
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: 打包模板
+        shell: bash
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          REF_TYPE: ${{ github.ref_type }}
+          TAG_FROM_REF: ${{ github.ref_name }}
+          SHA_NAME: ${{ github.sha }}
+        run: |
+          # 轨道判定：Tag 推送（含手动填 tag）走版本轨道；main 分支推送走 latest 轨道。
+          # 目标 Tag 与附件名后缀同源，避免两处各判一遍产生漂移。
+          if [ "$REF_TYPE" = "tag" ] || [ -n "$INPUT_TAG" ]; then
+            NAME="${INPUT_TAG:-$TAG_FROM_REF}"
+            RELEASE_TAG="$NAME"
+          else
+            NAME="latest"
+            RELEASE_TAG="templates-latest"
+          fi
+          [ -n "$RELEASE_TAG" ] || { echo "::error::无法确定发布目标 Tag"; exit 1; }
+          echo "RELEASE_TAG=$RELEASE_TAG" >> "$GITHUB_ENV"
+          echo "TEMPLATE_NAME=$NAME" >> "$GITHUB_ENV"
+          echo "产物名：godot_ci_trigger_templates_$NAME.zip"
+          python .github/scripts/build_template_bundle.py \
+            --src .github/templates --out dist \
+            --name "godot_ci_trigger_templates_$NAME.zip"
+
+          # 发布页正文：$TAG 换成轨道名，附本次构建的短 SHA 便于追溯。
+          # 落在 $RUNNER_TEMP：dist/ 只留待上传附件，正文文件经 create-notes-file 消费
+          sed -e "s/\$TAG/$NAME/g" -e "s/\$SHA/${SHA_NAME:0:7}/g" \
+            .github/templates/RELEASE-NOTES.md > "$RUNNER_TEMP/RELEASE-NOTES.md"
+          echo "发布正文：$(wc -l < "$RUNNER_TEMP/RELEASE-NOTES.md") 行"
+
+      - name: 上传模板产物
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: trigger-template
+          path: dist/*.zip
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: 发布 Release
+        uses: ./.github/actions/release-upload
+        with:
+          tag: ${{ env.RELEASE_TAG }}
+          assets-dir: dist
+          create-notes-file: ${{ runner.temp }}/RELEASE-NOTES.md
+          draft: ${{ inputs.draft }}

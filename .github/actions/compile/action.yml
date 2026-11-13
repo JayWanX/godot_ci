@@ -1,0 +1,60 @@
+name: 编译引擎
+description: 使用给定选项编译 Godot 引擎。
+
+inputs:
+  target:
+    description: 构建目标（editor、template_release、template_debug）。
+    default: editor
+    type: choice
+    options: [editor, template_debug, template_release]
+  platform:
+    description: 目标平台（契约平台名；linux 由本 action 映射为 SCons 的 linuxbsd）。
+    required: true
+    type: choice
+    options: [linux, windows, macos, android, ios, visionos, web]
+  scons-flags:
+    description: 附加 SCons 标志。
+    type: string
+  scons-cache:
+    description: SCons 缓存路径。
+    default: ${{ github.workspace }}/.scons_cache/
+    type: string
+  build-profile-path:
+    description: Godot 构建配置（.gdbuild / JSON）路径，经 build_profile= 传递。空则省略。
+    default: ""
+    type: string
+  scons-profile-path:
+    description: SCons 配置文件（profile.py）路径，经 profile= 传递。空则省略。
+    default: ""
+    type: string
+  custom-modules-dir:
+    description: 自定义模块目录路径，经 custom_modules= 传递。空则省略。
+    default: ""
+    type: string
+  encryption-key:
+    description: Godot PCK 加密密钥；仅本编译 step 进程级 env 注入，不落 GITHUB_ENV / 缓存键 / 日志。
+    default: ""
+    type: string
+
+runs:
+  using: composite
+  steps:
+    - name: 编译
+      shell: bash
+      env:
+        INPUT_PLATFORM: ${{ inputs.platform }}
+        INPUT_TARGET: ${{ inputs.target }}
+        INPUT_SCONS_FLAGS: ${{ inputs.scons-flags }}
+        INPUT_SCONS_CACHE: ${{ inputs.scons-cache }}
+        INPUT_BUILD_PROFILE_PATH: ${{ inputs.build-profile-path }}
+        INPUT_SCONS_PROFILE_PATH: ${{ inputs.scons-profile-path }}
+        INPUT_CUSTOM_MODULES_DIR: ${{ inputs.custom-modules-dir }}
+        SCRIPT_AES256_ENCRYPTION_KEY: ${{ inputs.encryption-key }}
+        PR_NUMBER: ${{ github.event.number }}
+      run: |
+        python "$GITHUB_ACTION_PATH/scripts/scons_build.py" \
+          --platform "$INPUT_PLATFORM" --target "$INPUT_TARGET" \
+          --scons-flags "$INPUT_SCONS_FLAGS" --scons-cache "$INPUT_SCONS_CACHE" \
+          --build-profile-path "$INPUT_BUILD_PROFILE_PATH" \
+          --profile-path "$INPUT_SCONS_PROFILE_PATH" \
+          --modules-dir "$INPUT_CUSTOM_MODULES_DIR"

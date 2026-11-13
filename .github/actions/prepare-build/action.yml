@@ -1,0 +1,88 @@
+name: 准备构建
+description: >-
+  平台构建 job 的前置准备：检出项目工作区（project/）、
+  按契约 artifacts.build_naming 渲染产物名并写入 env.ARTIFACT。
+  不检出 CI 资产与引擎源码——前者须由平台 job 在本 action 之前检出到 ci-support/
+  （composite 位于 ci-support/ 下，无法先加载自己），后者由平台 job 检出到工作区根。
+
+inputs:
+  platform:
+    description: 契约平台名（渲染产物名用，如 linux / windows / macos）。
+    required: true
+  target:
+    description: 构建目标（editor / template_debug / template_release）。
+    required: true
+  artifact-build-naming:
+    description: 产物命名模板（契约 artifacts.build_naming，resolve 归一化后传入）。
+    required: false
+    default: ""
+  artifact-prefix:
+    description: 产物名前缀（契约 artifacts.prefix，空则取 repo-safe 或仓库名）。
+    required: false
+    default: ""
+  arch:
+    description: 架构维度（macOS matrix.arch）；非空时产物名追加 _<arch>，避免同 run 重名。
+    required: false
+    default: ""
+  variant:
+    description: 变体维度（Web matrix.variant）；非空时产物名追加 _<variant>，避免同 run 重名。
+    required: false
+    default: ""
+  repo-safe:
+    description: 仓库名安全形式（artifact-prefix 为空时的次选前缀）。
+    required: false
+    default: ""
+  project-repo:
+    description: 待构建项目仓库 owner/repo（空=不检出项目工作区）。
+    required: false
+    default: ""
+  project-ref:
+    description: 待构建项目仓库 ref。
+    required: false
+    default: ""
+  repo-token:
+    description: 访问私有 CI 资产仓库与项目仓库的令牌。
+    required: false
+    default: ""
+
+outputs:
+  artifact:
+    description: 渲染后的产物名（同时写入 env.ARTIFACT 供 run 块使用）。
+    value: ${{ steps.render-artifact-name.outputs.artifact }}
+
+runs:
+  using: composite
+  steps:
+    # 项目工作区（固定布局 project/）：local: 来源条目与配置注入的解析基准。
+    - name: 检出项目工作区
+      if: inputs.project-repo != ''
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        repository: ${{ inputs.project-repo }}
+        ref: ${{ inputs.project-ref }}
+        token: ${{ inputs.repo-token }}
+        path: project
+        fetch-depth: 1
+
+    # 产物名由契约 artifacts.build_naming 模板渲染，构建侧与导出侧同源。
+    # 前缀三级取值：契约 artifacts.prefix → 调用方 repo-safe → 空（由脚本报错）。
+    # 不拿 `github.event.repository.name` 兜底：跨仓形态下它是**触发仓库**名，
+    # 与项目仓库名不同（外部项目构建时是 CI 仓库），取到会产出错名字的产物。
+    - name: 渲染产物名
+      id: render-artifact-name
+      shell: bash
+      env:
+        INPUT_ARTIFACT_BUILD_NAMING: ${{ inputs.artifact-build-naming }}
+        INPUT_ARTIFACT_PREFIX: ${{ inputs.artifact-prefix || inputs.repo-safe }}
+        INPUT_PLATFORM: ${{ inputs.platform }}
+        INPUT_TARGET: ${{ inputs.target }}
+        INPUT_ARCH: ${{ inputs.arch }}
+        INPUT_VARIANT: ${{ inputs.variant }}
+      run: |
+        NAME=$(python ci-support/.github/scripts/artifact_name.py \
+          --build-naming "$INPUT_ARTIFACT_BUILD_NAMING" --prefix "$INPUT_ARTIFACT_PREFIX" \
+          --platform "$INPUT_PLATFORM" --target "$INPUT_TARGET" \
+          --arch "$INPUT_ARCH" --variants "$INPUT_VARIANT")
+        echo "ARTIFACT=$NAME" >> "$GITHUB_ENV"
+        echo "artifact=$NAME" >> "$GITHUB_OUTPUT"
+        echo "产物名：$NAME"
