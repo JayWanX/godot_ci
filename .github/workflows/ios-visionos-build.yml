@@ -1,0 +1,210 @@
+name: ~ 📱 iOS/visionOS Build
+
+on:
+  workflow_call:
+    inputs:
+      runs-on:
+        description: 运行器标签（由 build.yml 从平台基线运行器映射下传）。
+        required: true
+        type: string
+      engine-repo:
+        description: Godot 引擎源码仓库（owner/repo）。
+        required: true
+        type: string
+      repo-safe:
+        description: 项目仓库 `owner/repo` 的末段名（产物名前缀）。
+        required: false
+        default: ""
+        type: string
+      engine-sha:
+        description: 引擎 ref 解析出的 commit SHA（缓存键稳定性依据）。
+        required: false
+        default: ""
+        type: string
+      engine-ref:
+        description: 引擎源码的分支、tag 或 commit SHA。
+        required: true
+        type: string
+      target:
+        description: 构建目标（editor, template_debug, template_release）。
+        required: false
+        default: template_release
+        type: string
+      platform:
+        description: 要构建的 Apple 平台（ios 或 visionos）。
+        required: false
+        default: ios
+        type: string
+      scons-flags:
+        description: 附加 SCons 编译标志。
+        required: false
+        default: ""
+        type: string
+      profile:
+        description: >-
+          custom.py 来源（空=跳过；local:<path> 或
+          remote:<owner/repo>[@<ref>][:<path>]）。
+        required: false
+        default: ""
+        type: string
+      build-profile:
+        description: >-
+          build profile（.gdbuild）来源（空=跳过；local:<path> 或
+          remote:<owner/repo>[@<ref>][:<path>]）。
+        required: false
+        default: ""
+        type: string
+      custom-modules:
+        description: '自定义模块来源条目，逗号分隔（remote:/local: 语法，见「来源声明语法」）。'
+        required: false
+        default: ""
+        type: string
+      project-repo:
+        description: '待构建项目仓库 owner/repo（空=手动触发未提供，local: 来源不可用）。'
+        required: false
+        default: ""
+        type: string
+      project-ref:
+        description: 项目仓库 ref。
+        required: false
+        default: ""
+        type: string
+      upload-artifacts:
+        description: 上传编译产物到 Artifacts。
+        required: false
+        default: true
+        type: boolean
+      compat-standard-includes:
+        description: 归一化的 standard_includes（on/off）。
+        required: false
+        default: "on"
+        type: string
+      retention-build:
+        description: 编译产物保留天数。
+        required: false
+        default: "7"
+        type: string
+      toolchain-json:
+        description: 工具链版本 JSON。
+        required: false
+        default: "{}"
+        type: string
+      hooks-bundle:
+        description: 扩展包 artifact 名（空=未启用）。
+        required: false
+        default: ""
+        type: string
+      hooks-sha:
+        description: 扩展包摘要（空=未启用）。
+        required: false
+        default: ""
+        type: string
+      ci-repository:
+        description: CI 资产仓库 owner/repo（跨仓形态取契约 ci.repository；单仓自用留空）。
+        required: false
+        default: ""
+        type: string
+      ci-ref:
+        description: CI 资产仓库 ref（跨仓形态取契约 ci.ref；单仓自用留空）。
+        required: false
+        default: ""
+        type: string
+      artifact-prefix:
+        description: 产物名前缀（契约 artifacts.prefix；空则取仓库名安全形式）。
+        required: false
+        default: ""
+        type: string
+      artifact-build-naming:
+        description: 产物命名模板（契约 artifacts.build_naming）；留空则读契约 schema 的默认值。
+        required: false
+        default: ""
+        type: string
+    secrets:
+      GIT_PAT:
+        description: "私有仓库访问令牌（remote: 来源与自定义模块）。"
+        required: false
+      ENCRYPTION_KEY:
+        description: "Godot PCK 加密密钥（十六进制）。空=不加密。"
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: iOS/visionOS 编译
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 60
+    env:
+      CACHE_KEY: ${{ inputs.platform }}_${{ inputs.target }}
+      # secret:<NAME> 钩子能力的值通道：job 级 env 按固定名注入，
+      # run_hooks 执行器按清单声明挑出、仅注入该 hook 子进程；不落日志。
+      GIT_PAT: ${{ secrets.GIT_PAT }}
+      ENCRYPTION_KEY: ${{ secrets.ENCRYPTION_KEY }}
+    steps:
+      - name: 检出引擎源码
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ inputs.engine-repo }}
+          ref: ${{ inputs.engine-ref }}
+          token: ${{ secrets.GIT_PAT || github.token }}
+          submodules: recursive
+
+      - name: 检出 CI 资产
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ inputs.ci-repository != '' && inputs.ci-repository || job.workflow_repository || github.repository }}
+          ref: ${{ inputs.ci-repository != '' && inputs.ci-ref || job.workflow_sha || github.sha }}
+          token: ${{ secrets.GIT_PAT || github.token }}
+          path: ci-support
+          fetch-depth: 1
+          filter: blob:none
+          sparse-checkout: .github
+
+      - name: 准备构建
+        uses: ./ci-support/.github/actions/prepare-build
+        with:
+          platform: ${{ inputs.platform }}
+          target: ${{ inputs.target }}
+          arch: ""
+          variant: ""
+          artifact-build-naming: ${{ inputs.artifact-build-naming }}
+          artifact-prefix: ${{ inputs.artifact-prefix }}
+          repo-safe: ${{ inputs.repo-safe }}
+          project-repo: ${{ inputs.project-repo }}
+          project-ref: ${{ inputs.project-ref }}
+          repo-token: ${{ secrets.GIT_PAT || github.token }}
+
+      - name: 编译
+        uses: ./ci-support/.github/actions/build-pipeline
+        with:
+          platform: ${{ inputs.platform }}
+          target: ${{ inputs.target }}
+          cache-key: ${{ env.CACHE_KEY }}
+          engine-sha: ${{ inputs.engine-sha }}
+          scons-flags: ${{ inputs.scons-flags }}
+          profile: ${{ inputs.profile }}
+          build-profile: ${{ inputs.build-profile }}
+          custom-modules: ${{ inputs.custom-modules }}
+          encryption-key: ${{ secrets.ENCRYPTION_KEY }}
+          repo-token: ${{ secrets.GIT_PAT }}
+          compat-standard-includes: ${{ inputs.compat-standard-includes }}
+          hooks-bundle: ${{ inputs.hooks-bundle }}
+          hooks-sha: ${{ inputs.hooks-sha }}
+          toolchain-json: ${{ inputs.toolchain-json }}
+
+      # 导出模板为目录或 zip，按任一产物存在判定，避免 0 返回但无产物
+      - name: 冒烟测试
+        if: inputs.target != 'editor'
+        shell: bash
+        run: |
+          test -n "$(ls -A bin 2>/dev/null)" \
+            || { echo "::error::bin/ 下无 iOS/visionOS 导出模板产物"; exit 1; }
+
+      - name: 打包并上传产物
+        uses: ./ci-support/.github/actions/package-artifact
+        with:
+          artifact-name: ${{ env.ARTIFACT }}
+          retention-days: ${{ inputs.retention-build }}
+          enabled: ${{ inputs.upload-artifacts }}
+

@@ -1,0 +1,56 @@
+name: 发布 Release 附件
+description: >-
+  确保 Release 存在并上传附件目录：不存在则按正文参数创建（幂等），已存在且有
+  notes 类输入时刷新正文（generate-notes 模式下保持原正文，附件无条件上传），
+  逐文件 --clobber 上传后列出附件。tag 由调用方解析后传入，本 action 不做来源推断。
+
+inputs:
+  tag:
+    description: 目标 Release 的 Tag（调用方解析好的最终值，留空报错）。
+    required: true
+  assets-dir:
+    description: 附件目录（平铺，逐文件 --clobber 上传；必须存在且非空）。
+    required: true
+  create-notes:
+    description: 创建/刷新正文用的文本（与 create-notes-file 互斥；generate-notes=true 时忽略）。留空忽略。
+    required: false
+    default: ""
+  create-notes-file:
+    description: 创建/刷新正文用的文件（与 create-notes 互斥；generate-notes=true 时忽略）。留空忽略。
+    required: false
+    default: ""
+  generate-notes:
+    description: "true 时创建正文用 --generate-notes（忽略 notes 类输入；已存在的 Release 不刷新正文）。"
+    required: false
+    default: "false"
+  draft:
+    description: Release 不存在时创建为草稿。
+    required: false
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - name: 发布 Release 附件
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        GITHUB_REPOSITORY: ${{ github.repository }}
+        INPUT_TAG: ${{ inputs.tag }}
+        INPUT_ASSETS_DIR: ${{ inputs.assets-dir }}
+        INPUT_CREATE_NOTES: ${{ inputs.create-notes }}
+        INPUT_CREATE_NOTES_FILE: ${{ inputs.create-notes-file }}
+        INPUT_GENERATE_NOTES: ${{ inputs.generate-notes }}
+        INPUT_IS_DRAFT: ${{ inputs.draft }}
+      run: |
+        # 实现与判据在 .github/scripts/release_upload.py（自测 tests/test_release_upload.py）；
+        # 布尔入参转 CLI 标志，其余参数原样透传，空串由脚本侧按「未提供」处理
+        FLAGS=()
+        [ "$INPUT_GENERATE_NOTES" = "true" ] && FLAGS+=(--generate-notes)
+        [ "$INPUT_IS_DRAFT" = "true" ] && FLAGS+=(--draft)
+        python3 "$GITHUB_ACTION_PATH/scripts/release_upload.py" \
+          --tag "$INPUT_TAG" \
+          --assets-dir "$INPUT_ASSETS_DIR" \
+          --create-notes "$INPUT_CREATE_NOTES" \
+          --create-notes-file "$INPUT_CREATE_NOTES_FILE" \
+          "${FLAGS[@]}"

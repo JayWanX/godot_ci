@@ -1,0 +1,29 @@
+name: 解压 7z 归档
+description: 安装 7z 并解压目录下的 .7z 归档。
+
+inputs:
+  archive-dir:
+    description: 解压目标目录，归档解压后就地删除 .7z。
+    required: false
+    default: templates
+
+runs:
+  using: composite
+  steps:
+    - name: 解压 7z 归档
+      shell: bash
+      env:
+        INPUT_ARCHIVE_DIR: ${{ inputs.archive-dir }}
+      run: |
+        if ! command -v 7z >/dev/null 2>&1; then
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            brew install 7zip
+          else
+            sudo apt-get update -qq && sudo apt-get install -y -qq p7zip-full
+          fi
+        fi
+        for f in "$INPUT_ARCHIVE_DIR"/*.7z; do
+          [ -f "$f" ] || continue
+          7z x "$f" -o"$INPUT_ARCHIVE_DIR" -y >/dev/null
+          rm "$f"
+        done

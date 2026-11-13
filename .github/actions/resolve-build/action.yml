@@ -1,0 +1,235 @@
+name: 解析构建参数
+description: >-
+  从 ci-contract.json 与界面输入解析引擎构建参数（经 godot_context.py 契约归一化），
+  产出 context.json 供钩子消费，输出供下游平台编译 job 使用。
+
+inputs:
+  project:
+    description: 待构建项目来源声明 remote:<owner/repo>[@<ref>] / local:<路径>；留空=构建本仓库。
+    required: false
+    default: ""
+  engine-source:
+    description: 引擎来源 owner/repo@ref（覆写契约 engine.source）。
+    required: false
+    default: ""
+  engine-ref:
+    description: 引擎引用，覆盖 engine-source 中的 @ref。
+    required: false
+    default: ""
+  target:
+    description: 构建目标（覆盖契约 engine.target[0]）。
+    required: false
+    default: ""
+  platform:
+    description: 构建平台，逗号分隔（覆盖契约 engine.platform）。
+    required: false
+    default: ""
+  scons-flags:
+    description: 附加 SCons 标志（覆盖契约 build.scons_flags）。
+    required: false
+    default: ""
+  profile:
+    description: SCons profile 来源覆写（空 / `remote:<owner/repo>[@<ref>][:<path>]` / `local:<path>`）。
+    required: false
+    default: ""
+  build-profile:
+    description: build profile（.gdbuild）来源覆写（空 / `remote:<owner/repo>[@<ref>][:<path>]` / `local:<path>`）。
+    required: false
+    default: ""
+  custom-modules:
+    description: >-
+      自定义模块来源条目，逗号分隔（覆写契约 build.modules）。
+      每条写 `remote:<owner/repo>[@<ref>][:<path>]` 或 `local:<path>`。
+    required: false
+    default: ""
+  force-upload:
+    description: 强制上传产物到 Artifacts。
+    required: false
+    default: false
+  caller-uses-ref:
+    description: '调用方 uses: …@<ref> 里的 ref；resolve 期断言与 ci.ref / $schema URL 的 ref 段三者一致。'
+    required: false
+    default: ""
+  repo-token:
+    description: 访问私有项目仓库的令牌（由调用方传 secrets.GIT_PAT）。
+    required: false
+    default: ""
+
+outputs:
+  platforms:
+    description: 平台 JSON 数组。
+    value: ${{ steps.resolve.outputs.platforms }}
+  engine-repo:
+    description: 引擎仓库 owner/repo。
+    value: ${{ steps.resolve.outputs.engine-repo }}
+  project-repo:
+    description: 待构建项目仓库 owner/repo。
+    value: ${{ steps.resolve.outputs.project-repo }}
+  project-ref:
+    description: 待构建项目 ref。
+    value: ${{ steps.resolve.outputs.project-ref }}
+  repo-safe:
+    description: 项目仓库名安全形式（产物名前缀）。
+    value: ${{ steps.resolve.outputs.repo-safe }}
+  engine-ref:
+    description: 引擎 ref。
+    value: ${{ steps.resolve.outputs.engine-ref }}
+  engine-sha:
+    description: 引擎 commit SHA。
+    value: ${{ steps.resolve.outputs.engine-sha }}
+  target:
+    description: 构建目标。
+    value: ${{ steps.resolve.outputs.target }}
+  profile:
+    description: SCons profile 来源。
+    value: ${{ steps.resolve.outputs.profile }}
+  build-profile:
+    description: build profile（.gdbuild）来源。
+    value: ${{ steps.resolve.outputs.build-profile }}
+  custom-modules:
+    description: 自定义模块。
+    value: ${{ steps.resolve.outputs.custom-modules }}
+  upload-artifacts:
+    description: 是否上传产物。
+    value: ${{ steps.resolve.outputs.upload-artifacts }}
+  scons-flags:
+    description: 契约归一化的附加 SCons 标志。
+    value: ${{ steps.resolve.outputs.scons-flags }}
+  compat-standard-includes-linux:
+    description: Linux 平台的 standard_includes（on|off）。
+    value: ${{ steps.resolve.outputs.compat-standard-includes-linux }}
+  compat-standard-includes-windows:
+    description: Windows 平台的 standard_includes（on|off）。
+    value: ${{ steps.resolve.outputs.compat-standard-includes-windows }}
+  compat-standard-includes-macos:
+    description: macOS 平台的 standard_includes（on|off）。
+    value: ${{ steps.resolve.outputs.compat-standard-includes-macos }}
+  compat-standard-includes-android:
+    description: Android 平台的 standard_includes（on|off）。
+    value: ${{ steps.resolve.outputs.compat-standard-includes-android }}
+  compat-standard-includes-ios:
+    description: iOS 平台的 standard_includes（on|off）。
+    value: ${{ steps.resolve.outputs.compat-standard-includes-ios }}
+  compat-standard-includes-visionos:
+    description: visionOS 平台的 standard_includes（on|off）。
+    value: ${{ steps.resolve.outputs.compat-standard-includes-visionos }}
+  compat-standard-includes-web:
+    description: Web 平台的 standard_includes（on|off）。
+    value: ${{ steps.resolve.outputs.compat-standard-includes-web }}
+  retention-build:
+    description: 编译产物保留天数。
+    value: ${{ steps.resolve.outputs.retention-build }}
+  toolchain-json:
+    description: 工具链版本 JSON。
+    value: ${{ steps.resolve.outputs.toolchain-json }}
+  runner-json:
+    description: 平台基线运行器映射 JSON。
+    value: ${{ steps.resolve.outputs.runner-json }}
+  platforms-json:
+    description: 平台配置 JSON（平台 → {build_runner, export_runner, editor_archive, variants}，含契约覆写）。
+    value: ${{ steps.resolve.outputs.platforms-json }}
+  artifact-prefix:
+    description: 产物名前缀（契约 artifacts.prefix，空则取仓库名安全形式）。
+    value: ${{ steps.resolve.outputs.artifact-prefix }}
+  artifact-build-naming:
+    description: 编译产物命名模板（契约 artifacts.build_naming）。
+    value: ${{ steps.resolve.outputs.artifact-build-naming }}
+  ci-repository:
+    description: CI 资产仓库 owner/repo（契约 ci.repository；单仓自用为空，消费方从本次运行所属仓库检出）。
+    value: ${{ steps.resolve.outputs.ci-repository }}
+  ci-ref:
+    description: CI 资产仓库 ref（契约 ci.ref；单仓自用为空）。
+    value: ${{ steps.resolve.outputs.ci-ref }}
+  hooks-manifest:
+    description: 扩展清单路径。
+    value: ${{ steps.resolve.outputs.hooks-manifest }}
+  hooks-policy:
+    description: 扩展策略 off|declared。
+    value: ${{ steps.resolve.outputs.hooks-policy }}
+  contract-path:
+    description: 实际读取的契约路径（外部项目为克隆目录内）。
+    value: ${{ steps.resolve.outputs.contract-path }}
+  project-root:
+    description: 项目仓库根（外部项目为克隆目录）。
+    value: ${{ steps.resolve.outputs.project-root }}
+  hooks-bundle:
+    description: 扩展包 artifact 名（空=未启用）。
+    value: ${{ steps.bundle.outputs.hooks-bundle }}
+  hooks-sha:
+    description: 扩展包摘要（空=未启用）。
+    value: ${{ steps.bundle.outputs.hooks-sha }}
+
+runs:
+  using: composite
+  steps:
+    - name: 解析构建参数
+      id: resolve
+      shell: bash
+      env:
+        INPUT_PROJECT: ${{ inputs.project }}
+        INPUT_ENGINE_SOURCE: ${{ inputs.engine-source }}
+        INPUT_ENGINE_REF: ${{ inputs.engine-ref }}
+        INPUT_TARGET: ${{ inputs.target }}
+        INPUT_PLATFORM: ${{ inputs.platform }}
+        INPUT_SCONS_FLAGS: ${{ inputs.scons-flags }}
+        INPUT_PROFILE: ${{ inputs.profile }}
+        INPUT_BUILD_PROFILE: ${{ inputs.build-profile }}
+        INPUT_CUSTOM_MODULES: ${{ inputs.custom-modules }}
+        INPUT_FORCE_UPLOAD: ${{ inputs.force-upload }}
+        INPUT_REPO_TOKEN: ${{ inputs.repo-token }}
+        CALLER_USES_REF: ${{ inputs.caller-uses-ref }}
+        EVENT_NAME: ${{ github.event_name }}
+        PAYLOAD: ${{ toJSON(github.event.client_payload) }}
+        CURRENT_REPO: ${{ github.repository }}
+        CURRENT_SHA: ${{ github.sha }}
+        GITHUB_REPOSITORY: ${{ github.repository }}
+        GITHUB_SHA: ${{ github.sha }}
+        RUNNER_OS: ${{ runner.os }}
+      run: python "$GITHUB_ACTION_PATH/scripts/resolve_build.py"
+
+    - name: 生成运行时上下文
+      shell: bash
+      env:
+        CI_CONTRACT: ${{ steps.resolve.outputs.contract-path }}
+        ENGINE_SHA: ${{ steps.resolve.outputs.engine-sha }}
+        # resolve 期为多平台批：platform / target 置 null（不过滤，hook_matches 与
+        # on.platform 省略同构）；本 job 工作区无引擎源码，ENGINE_ROOT 显式传空
+        ENGINE_ROOT: ""
+        PROJECT_ROOT: ${{ steps.resolve.outputs.project-root }}
+        REPO_SAFE: ${{ steps.resolve.outputs.repo-safe }}
+        GITHUB_REPOSITORY: ${{ github.repository }}
+        GITHUB_SHA: ${{ github.sha }}
+        GITHUB_REF_NAME: ${{ github.ref_name }}
+        GITHUB_RUN_ID: ${{ github.run_id }}
+        GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
+        GITHUB_EVENT_NAME: ${{ github.event_name }}
+        GITHUB_WORKSPACE: ${{ github.workspace }}
+        RUNNER_OS: ${{ runner.os }}
+        CALLER_USES_REF: ${{ inputs.caller-uses-ref }}
+        INPUT_SCONS_FLAGS: ${{ inputs.scons-flags }}
+      run: |
+        python "$GITHUB_ACTION_PATH/../../scripts/godot_context.py" \
+          --resolve --chain build --out context.json
+
+    - name: 校验并打包扩展清单
+      id: bundle
+      shell: bash
+      env:
+        HOOKS_MANIFEST: ${{ steps.resolve.outputs.hooks-manifest }}
+        HOOKS_POLICY: ${{ steps.resolve.outputs.hooks-policy }}
+      run: |
+        # run_hooks.py validate 自行判定清单是否存在并写 hooks-bundle / hooks-sha 两行输出
+        # 无清单=空转，输出空串，下游 workflow 用 if: hooks-bundle != '' 短路
+        python "$GITHUB_ACTION_PATH/../../scripts/run_hooks.py" validate \
+          --manifest "$HOOKS_MANIFEST" --policy "$HOOKS_POLICY" \
+          --chain build --context context.json \
+          --out plan.json --bundle-out hooks-bundle
+
+    - name: 上传扩展包
+      if: steps.bundle.outputs.hooks-bundle != ''
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: ${{ steps.bundle.outputs.hooks-bundle }}
+        path: hooks-bundle/
+        if-no-files-found: error
+        retention-days: ${{ steps.resolve.outputs.retention-contract }}

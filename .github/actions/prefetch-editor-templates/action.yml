@@ -1,0 +1,44 @@
+name: 预取官方编辑器
+description: >-
+  下载指定平台的官方编辑器并以规范名上传为 artifact（<repo-safe>_editor_<editor-key>），
+  由 export.yml 的 prefetch job 按基线 platforms.<平台>.editor_archive 按档案去重后逐 matrix 项调用。
+
+inputs:
+  editor-version:
+    description: 官方编辑器版本标签（由契约 export.editor_version 提供）。
+    required: true
+  editor-platform:
+    description: 官方编辑器下载平台（如 linux.x86_64，取自基线 platforms.<平台>.editor_archive 的值）。
+    required: true
+  editor-key:
+    description: 首个使用该档案的平台名（artifact 名末段；导出侧按 <repo-safe>_editor_* pattern 下载）。
+    required: true
+  repo-safe:
+    description: 仓库安全名（产物名前缀，下游按此前缀下载）。
+    required: true
+  retention-days:
+    description: 预取产物保留天数（由契约 artifacts.retention.prefetch 提供）。
+    required: false
+    default: "1"
+
+runs:
+  using: composite
+  steps:
+    - name: 下载编辑器
+      shell: bash
+      env:
+        INPUT_EDITOR_VERSION: ${{ inputs.editor-version }}
+        INPUT_EDITOR_PLATFORM: ${{ inputs.editor-platform }}
+      run: |
+        # 各 runner 系统的编辑器互不可执行，每 matrix 项只取自己那份（平台来自基线映射）
+        curl -fsSL --retry 3 -o "editor-$INPUT_EDITOR_PLATFORM.zip" \
+          "https://github.com/godotengine/godot/releases/download/$INPUT_EDITOR_VERSION/Godot_v${INPUT_EDITOR_VERSION}_${INPUT_EDITOR_PLATFORM}.zip"
+        ls -lh editor-*.zip
+
+    - name: 上传编辑器
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: ${{ inputs.repo-safe }}_editor_${{ inputs.editor-key }}
+        path: editor-${{ inputs.editor-platform }}.zip
+        if-no-files-found: error
+        retention-days: ${{ inputs.retention-days }}

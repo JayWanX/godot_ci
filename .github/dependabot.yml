@@ -1,0 +1,99 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 1
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+    labels:
+      - dependencies
+      - github-actions
+  - package-ecosystem: github-actions
+    directory: /.github/actions/artifact-upload
+    schedule: {interval: weekly}
+    open-pull-requests-limit: 1
+    labels: [dependencies, github-actions]
+  - package-ecosystem: github-actions
+    directory: /.github/actions/build-pipeline
+    schedule: {interval: weekly}
+    open-pull-requests-limit: 1
+    labels: [dependencies, github-actions]
+  - package-ecosystem: github-actions
+    directory: /.github/actions/cache-restore
+    schedule: {interval: weekly}
+    open-pull-requests-limit: 1
+    labels: [dependencies, github-actions]
+  - package-ecosystem: github-actions
+    directory: /.github/actions/cache-save
+    schedule: {interval: weekly}
+    open-pull-requests-limit: 1
+    labels: [dependencies, github-actions]
+  - package-ecosystem: github-actions
+    directory: /.github/actions/compile
+    schedule: {interval: weekly}
+    open-pull-requests-limit: 1
+    labels: [dependencies, github-actions]
+  - package-ecosystem: github-actions
+    directory: /.github/actions/config-inject
+    schedule: {interval: weekly}
+    open-pull-requests-limit: 1
+    labels: [dependencies, github-actions]
+  - package-ecosystem: github-actions
+    directory: /.github/actions/detect-deps
+    schedule: {interval: weekly}
+    open-pull-requests-limit: 1
+    labels: [dependencies, github-actions]
+  - package-ecosystem: github-actions
+    directory: /.github/actions/export
+    schedule: {interval: weekly}
+    open-pull-requests-limit: 1
+    labels: [dependencies, github-actions]
+  - package-ecosystem: github-actions
+    directory: /.github/actions/hooks
+    schedule: {interval: weekly}
+    open-pull-requests-limit: 1
+    labels: [dependencies, github-actions]
+  - package-ecosystem: github-actions
+    directory: /.github/actions/package-artifact
+    schedule: {interval: weekly}
+    open-pull-requests-limit: 1
+    labels: [dependencies, github-actions]
+  - package-ecosystem: github-actions
+    directory: /.github/actions/prefetch-editor-templates
+    schedule: {interval: weekly}
+    open-pull-requests-limit: 1
+    labels: [dependencies, github-actions]
+  - package-ecosystem: github-actions
+    directory: /.github/actions/prepare-build
+    schedule: {interval: weekly}
+    open-pull-requests-limit: 1
+    labels: [dependencies, github-actions]
+  - package-ecosystem: github-actions
+    directory: /.github/actions/release-upload
+    schedule: {interval: weekly}
+    open-pull-requests-limit: 1
+    labels: [dependencies, github-actions]
+  - package-ecosystem: github-actions
+    directory: /.github/actions/resolve-build
+    schedule: {interval: weekly}
+    open-pull-requests-limit: 1
+    labels: [dependencies, github-actions]
+  - package-ecosystem: github-actions
+    directory: /.github/actions/resolve-export
+    schedule: {interval: weekly}
+    open-pull-requests-limit: 1
+    labels: [dependencies, github-actions]
+  - package-ecosystem: github-actions
+    directory: /.github/actions/setup-scons
+    schedule: {interval: weekly}
+    open-pull-requests-limit: 1
+    labels: [dependencies, github-actions]
+  - package-ecosystem: github-actions
+    directory: /.github/actions/unpack-7z
+    schedule: {interval: weekly}
+    open-pull-requests-limit: 1
+    labels: [dependencies, github-actions]

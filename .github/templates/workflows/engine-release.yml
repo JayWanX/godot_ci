@@ -1,0 +1,24 @@
+# 模板：复制到项目仓库 .github/workflows/engine-release.yml（布局同本目录，无需重命名）。
+# 复制后零必改；锁版本 / CI 仓库搬家的变更点见 .github/CI-USAGE.md。
+# 按本项目契约编译引擎，产物上传为本项目仓库的 Release 附件（引擎快照）。
+name: 🏗️ Engine Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 发布到该 Tag 的 Release；留空用 CI 侧默认 engine-snapshot。
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: write # 创建 / 上传 Release 到本项目仓库
+
+jobs:
+  engine-release:
+    uses: JayWanX/godot_ci/.github/workflows/engine-release.yml@main
+    with:
+      tag: ${{ inputs.tag }}
+      caller-uses-ref: main # 与上面 uses:@main 同值
+    secrets: inherit

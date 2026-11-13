@@ -1,0 +1,131 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Godot CI 扩展清单",
+  "description": "项目侧 .github/ci-hooks.json。路径与策略由契约 hooks 段声明。数组书写顺序即执行顺序，无 needs/order/parallel。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["hooks"],
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "编辑器校验指针，指向本 CI 仓库 hooks.schema.json"
+    },
+    "hooks": {
+      "type": "array",
+      "description": "钩子条目数组，书写顺序即执行顺序（串行，无 needs/order/parallel）",
+      "items": { "$ref": "#/definitions/hook" }
+    }
+  },
+  "definitions": {
+    "hook": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "on",
+        "run",
+        "capabilities",
+        "outputs",
+        "cache_impact"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]+$",
+          "description": "钩子唯一标识，用于日志与 plan 索引"
+        },
+        "on": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["anchor", "phase"],
+          "description": "订阅声明：挂在哪个锚点，可叠加过滤器",
+          "properties": {
+            "anchor": {
+              "type": "string",
+              "description": "锚点 id，须存在于 hooks-anchors.json"
+            },
+            "phase": {
+              "type": "string",
+              "enum": ["before", "after"],
+              "description": "锚点前 / 后执行；须为该锚点 phases 已接线的值，未接线组合 validate 期拒绝"
+            },
+            "platform": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "按平台过滤，省略或空名单 = 全部"
+            },
+            "target": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "按编译目标过滤，省略或空名单 = 全部"
+            },
+            "chains": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": ["build", "export", "release"]
+              },
+              "description": "限定订阅链，须为锚点支持链的子集；省略或空名单 = 订阅锚点支持的全部链"
+            },
+            "presets": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "按导出预设过滤（仅 export 链有意义；订阅到不含 export 的链 validate 期拒绝），省略或空名单 = 全部"
+            }
+          }
+        },
+        "run": {
+          "type": "string",
+          "description": "相对 context.project.root；禁绝对路径 / .. / 逃逸 / 符号链接"
+        },
+        "with": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "传给钩子的输入",
+          "properties": {
+            "inputs": {
+              "type": "array",
+              "items": { "type": "string" },
+              "default": [],
+              "description": "依赖闭包文件列表（相对项目根）；resolve 期递归扫描 import 并校验，逐个进 bundle"
+            }
+          }
+        },
+        "write_paths": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "声明本钩子会写的项目内路径（相对 context.project.root，如 python/**、build/**、project.godot）。须同时声明 write:project_tree 能力，双向互校。脚本必须以 GODOT_HOOK_PROJECT_ROOT 取项目根（bundle 会改变脚本位置，__file__ 推算不可靠），未引用即 validate 期拒绝。执行器按此建快照、放行写入、失败回滚；build 链的写入并入缓存摘要，export/release 链只做快照与回滚。未声明路径的写入仍拒绝"
+        },
+        "capabilities": {
+          "type": "array",
+          "items": { "type": "string" },
+          "minItems": 1,
+          "description": "能力声明，须为 hooks-capabilities.json capabilities 键的子集；secret:<NAME> 的 NAME 须在其 secret_names 白名单内；read:context 默认授予"
+        },
+        "outputs": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "可产出键，须为所声明能力 capability_outputs 映射的子集"
+        },
+        "cache_impact": {
+          "type": "string",
+          "enum": ["none", "config", "source"],
+          "description": "缓存影响：none=不进缓存键；config=进 config-hash；source=进 source-hash"
+        },
+        "on_error": {
+          "type": "string",
+          "enum": ["fail", "warn"],
+          "default": "fail",
+          "description": "fail=失败终止；warn=回滚并记 job summary 后继续"
+        },
+        "timeout_minutes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 15,
+          "default": 5,
+          "description": "单钩子超时，超时杀进程组"
+        }
+      }
+    }
+  }
+}

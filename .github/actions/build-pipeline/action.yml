@@ -1,0 +1,436 @@
+name: 运行构建流水线
+description: >-
+  安装依赖 → 注入配置 → [扩展分发] → 恢复缓存 → 探测并安装可选 SDK → 补齐标准头 → 编译 → 保存缓存。
+  平台特例步骤按 platform 输入内联，调用方只写检出与产物处理。
+  扩展链用 workflow 层 if: hooks-bundle != '' 短路：无清单时不下载 bundle、不跑 dispatcher。
+
+inputs:
+  platform:
+    description: 目标平台（契约平台名：linux, windows, macos, android, ios, visionos, web）。
+    required: true
+  target:
+    description: 构建目标（editor, template_debug, template_release）。
+    required: true
+  cache-key:
+    description: 缓存键前缀（平台_target[_arch]），不含仓库名以便同配置跨项目复用。
+    required: true
+  scons-flags:
+    description: 附加 SCons 标志（契约归一化值；扩展可覆写）。
+    required: false
+    default: ""
+  scons-cache:
+    description: SCons 缓存路径。
+    required: false
+    default: ${{ github.workspace }}/.scons_cache/
+  engine-sha:
+    description: 引擎 ref 解析出的 commit SHA，用于生成稳定缓存键。
+    required: false
+    default: ""
+  profile:
+    description: SCons profile 来源（空 / `remote:<owner/repo>[@<ref>][:<path>]` / `local:<path>`）。
+    required: false
+    default: ""
+  build-profile:
+    description: build profile（.gdbuild）来源（空 / `remote:<owner/repo>[@<ref>][:<path>]` / `local:<path>`）。
+    required: false
+    default: ""
+  custom-modules:
+    description: '逗号分隔的自定义模块来源条目（remote:/local:）。'
+    required: false
+    default: ""
+  project-root:
+    description: '项目工作区根（固定布局 project/，调用方检出；local: 条目与配置的解析基准）。'
+    required: false
+    default: "project"
+  encryption-key:
+    description: Godot PCK 加密密钥（十六进制）。
+    required: false
+    default: ""
+  repo-token:
+    description: 私有仓库访问令牌。
+    required: false
+    default: ""
+  toolchain-json:
+    description: 工具链版本（契约 build.toolchain 覆写基线的归一化结果）。
+    required: false
+    default: "{}"
+  compat-standard-includes:
+    description: 归一化的 standard_includes（on/off）；off 时跳过补齐标准头。
+    required: false
+    default: "on"
+  hooks-bundle:
+    description: 扩展包 artifact 名（空=未启用，整条扩展链短路）。
+    required: false
+    default: ""
+  hooks-sha:
+    description: 扩展包摘要（空=未启用时省略缓存键第 5 段）。
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: 安装系统依赖
+      if: inputs.platform == 'linux'
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends \
+          libwayland-bin libgl1-mesa-dev libx11-dev libxcursor-dev \
+          libxinerama-dev libxrandr-dev libxi-dev libasound2-dev p7zip-full
+
+    # 工具链版本：resolve 归一化的 toolchain-json（契约 build.toolchain 覆写平台基线）。
+    - name: 解析工具链版本
+      id: toolchain
+      shell: bash
+      env:
+        INPUT_TOOLCHAIN_JSON: ${{ inputs.toolchain-json }}
+      run: python "$GITHUB_ACTION_PATH/scripts/resolve_toolchain.py" --toolchain-json "$INPUT_TOOLCHAIN_JSON"
+
+    - name: 安装 Java
+      if: inputs.platform == 'android'
+      uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+      with:
+        distribution: temurin
+        java-version: ${{ steps.toolchain.outputs.java }}
+
+    - name: 安装打包工具
+      if: inputs.platform == 'windows'
+      shell: bash
+      run: |
+        command -v 7z >/dev/null 2>&1 || choco install 7zip -y --no-progress
+
+    - name: 安装打包工具
+      if: inputs.platform == 'android'
+      shell: bash
+      run: |
+        command -v 7z >/dev/null 2>&1 || {
+          sudo apt-get update -qq && sudo apt-get install -y -qq p7zip-full
+        }
+
+    - name: 配置 Emscripten
+      if: inputs.platform == 'web'
+      uses: emscripten-core/setup-emsdk@4528d102f7230f0e7b276855c01ea1159be0e984
+      with:
+        version: ${{ steps.toolchain.outputs.emsdk }}
+
+    - name: 校验 Emscripten
+      if: inputs.platform == 'web'
+      shell: bash
+      run: emcc -v
+
+    - name: 安装 SCons
+      uses: ./ci-support/.github/actions/setup-scons
+      with:
+        scons-version: ${{ steps.toolchain.outputs.scons }}
+
+    # 缓存键含配置摘要，须先注入配置再恢复缓存
+    - name: 注入配置
+      id: inject-config
+      uses: ./ci-support/.github/actions/config-inject
+      with:
+        profile: ${{ inputs.profile }}
+        build-profile: ${{ inputs.build-profile }}
+        custom-modules: ${{ inputs.custom-modules }}
+        project-root: ${{ inputs.project-root }}
+        encryption-key: ${{ inputs.encryption-key }}
+        repo-token: ${{ inputs.repo-token }}
+
+    # ---- 扩展链（无清单时以下全部短路）----
+    - name: 下载扩展包
+      if: inputs.hooks-bundle != ''
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      with:
+        name: ${{ inputs.hooks-bundle }}
+        path: hooks-bundle
+
+    - name: 生成运行时上下文
+      if: inputs.hooks-bundle != ''
+      shell: bash
+      env:
+        GITHUB_WORKSPACE: ${{ github.workspace }}
+        GITHUB_REPOSITORY: ${{ github.repository }}
+        WORKFLOW_REPOSITORY: ${{ job.workflow_repository || github.repository }}
+        GITHUB_SHA: ${{ github.sha }}
+        GITHUB_REF_NAME: ${{ github.ref_name }}
+        GITHUB_RUN_ID: ${{ github.run_id }}
+        GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
+        GITHUB_EVENT_NAME: ${{ github.event_name }}
+        RUNNER_OS: ${{ runner.os }}
+        ENGINE_SHA: ${{ inputs.engine-sha }}
+        ENGINE_ROOT: ${{ github.workspace }}
+        PROJECT_ROOT: ${{ github.workspace }}/project
+        PROFILE_PATH: ${{ steps.inject-config.outputs.scons-profile-path }}
+        BUILD_PROFILE_PATH: ${{ steps.inject-config.outputs.build-profile-path }}
+        CACHE_KEY: ${{ inputs.cache-key }}
+        # 用户可控输入经 env 注入：不把 inputs.* 内联进命令行
+        INPUT_TARGET: ${{ inputs.target }}
+        INPUT_PLATFORM: ${{ inputs.platform }}
+      run: python "$GITHUB_ACTION_PATH/../../scripts/godot_context.py" --resolve --chain build --target "$INPUT_TARGET" --platform "$INPUT_PLATFORM" --out context.json
+
+    - name: 扩展 inject-config:after
+      if: inputs.hooks-bundle != ''
+      uses: ./ci-support/.github/actions/hooks
+      with:
+        anchor: inject-config
+        phase: after
+        chain: build
+        hooks-bundle: ${{ inputs.hooks-bundle }}
+        context: context.json
+        plan: hooks-bundle/plan.json
+        bundle-dir: hooks-bundle
+        scons-flags: ${{ inputs.scons-flags }}
+
+    # config-hash 前锚点：write:scons_flags / write:profile_patch 的声明处；
+    # 必须在「计算配置摘要」与「应用配置补丁」之前执行。
+    - name: 扩展 config-hash:before
+      if: inputs.hooks-bundle != ''
+      uses: ./ci-support/.github/actions/hooks
+      with:
+        anchor: config-hash
+        phase: before
+        chain: build
+        hooks-bundle: ${{ inputs.hooks-bundle }}
+        context: context.json
+        plan: hooks-bundle/plan.json
+        bundle-dir: hooks-bundle
+        scons-flags: ${{ inputs.scons-flags }}
+
+    # hooks-result.json 是唯一跨 step 传值通道；无 bundle 时本 step 短路，
+    # 下游以 `outputs.* || inputs.*` 兜底。
+    - name: 归一化扩展结果
+      id: normalize-hooks-result
+      if: inputs.hooks-bundle != ''
+      shell: bash
+      env:
+        INPUT_SCONS_FLAGS: ${{ inputs.scons-flags }}
+      run: |
+        python "$GITHUB_ACTION_PATH/../../scripts/normalize_hooks_result.py" \
+        --fields merged-flags,config-digests,source-hash,source-active,post-build \
+        --base-flags "$INPUT_SCONS_FLAGS"
+
+    # 配置层补丁须在计算配置摘要之前落到注入的 profile.py；
+    # 未注入 profile 时有产出即报错、无产出空操作。
+    - name: 应用配置补丁
+      if: inputs.hooks-bundle != ''
+      shell: bash
+      env:
+        PROFILE_PATH: ${{ steps.inject-config.outputs.scons-profile-path }}
+      run: |
+        python "$GITHUB_ACTION_PATH/../../scripts/apply_hook_patches.py" \
+        --result hooks-result.json --kind profile_patch --target "$PROFILE_PATH"
+
+    - name: 计算配置摘要
+      id: config-hash
+      shell: bash
+      env:
+        PROFILE: ${{ steps.inject-config.outputs.scons-profile-path }}
+        BUILD_PROFILE: ${{ steps.inject-config.outputs.build-profile-path }}
+        MODULES: ${{ steps.inject-config.outputs.custom-modules-dir }}
+        # config_hash / detect-deps / 编译三处消费点读同一 merged-flags
+        SCONS_FLAGS: ${{ steps.normalize-hooks-result.outputs.merged-flags || inputs.scons-flags }}
+        # 敏感值走 env：与 compile step 的 SCRIPT_AES256_ENCRYPTION_KEY 同名，
+        # 不经 argv（进程参数表会短暂暴露密钥）
+        SCRIPT_AES256_ENCRYPTION_KEY: ${{ inputs.encryption-key }}
+        PLAN_JSON: ${{ inputs.hooks-bundle != '' && 'hooks-bundle/plan.json' || '' }}
+        CONFIG_HOOK_DIGESTS: ${{ steps.normalize-hooks-result.outputs.config-digests || '' }}
+      run: |
+        HASH="$(python "$GITHUB_ACTION_PATH/scripts/config_hash.py" \
+          --profile "${PROFILE:-}" --build-profile "${BUILD_PROFILE:-}" \
+          --modules "${MODULES:-}" --scons-flags "${SCONS_FLAGS:-}" \
+          --plan-json "${PLAN_JSON:-}" --hook-output-digests "${CONFIG_HOOK_DIGESTS:-}")"
+        echo "config-hash=$HASH" >> "$GITHUB_OUTPUT"
+        echo "配置摘要：$HASH"
+
+    # 源码层补丁在缓存恢复前应用到引擎源码根，并纳入 source-hash。
+    - name: 扩展 cache-restore:before
+      if: inputs.hooks-bundle != ''
+      uses: ./ci-support/.github/actions/hooks
+      with:
+        anchor: cache-restore
+        phase: before
+        chain: build
+        hooks-bundle: ${{ inputs.hooks-bundle }}
+        context: context.json
+        plan: hooks-bundle/plan.json
+        bundle-dir: hooks-bundle
+        scons-flags: ${{ inputs.scons-flags }}
+
+    # 补丁不适用即构建失败。
+    - name: 应用源码补丁
+      if: inputs.hooks-bundle != ''
+      shell: bash
+      env:
+        ENGINE_ROOT: ${{ github.workspace }}
+      run: |
+        python "$GITHUB_ACTION_PATH/../../scripts/apply_hook_patches.py" \
+        --result hooks-result.json --kind source_patch --engine-root "$ENGINE_ROOT"
+
+    # source-hash 取 cache-restore:before 之后的终值。
+    - name: 归一化源码摘要
+      id: normalize-source-hash
+      if: inputs.hooks-bundle != ''
+      shell: bash
+      run: |
+        python "$GITHUB_ACTION_PATH/../../scripts/normalize_hooks_result.py" \
+        --fields source-hash,source-active
+
+    - name: 恢复缓存
+      uses: ./ci-support/.github/actions/cache-restore
+      with:
+        scons-cache: ${{ inputs.scons-cache }}
+        cache-key: ${{ inputs.cache-key }}
+        engine-sha: ${{ inputs.engine-sha }}
+        config-hash: ${{ steps.config-hash.outputs.config-hash }}
+        source-hash: ${{ steps.normalize-source-hash.outputs.source-hash || steps.normalize-hooks-result.outputs.source-hash || '' }}
+        hooks-sha: ${{ inputs.hooks-sha }}
+        # 空值语义由 cache-restore 定义（input default 为 false），此处不再拼兜底常量
+        source-hash-active: ${{ steps.normalize-source-hash.outputs.source-active || steps.normalize-hooks-result.outputs.source-active }}
+      continue-on-error: true
+
+    - name: 探测依赖
+      if: inputs.platform == 'windows' || inputs.platform == 'macos'
+      id: detect-deps
+      uses: ./ci-support/.github/actions/detect-deps
+      with:
+        platform: ${{ inputs.platform }}
+        scons-profile-path: ${{ steps.inject-config.outputs.scons-profile-path }}
+        scons-flags: ${{ steps.normalize-hooks-result.outputs.merged-flags || inputs.scons-flags }}
+
+    - name: 安装 MinGW
+      if: inputs.platform == 'windows' && steps.detect-deps.outputs.need-mingw == 'true'
+      uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2.33.0
+      with:
+        msystem: MINGW64
+        install: mingw-w64-x86_64-gcc
+
+    - name: 安装 D3D12 SDK
+      if: inputs.platform == 'windows' && steps.detect-deps.outputs.need-d3d12 == 'true'
+      shell: bash
+      run: python ./misc/scripts/install_d3d12_sdk_windows.py
+
+    - name: 安装 WinRT 组件
+      if: inputs.platform == 'windows' && steps.detect-deps.outputs.need-winrt == 'true'
+      shell: bash
+      run: python ./misc/scripts/install_winrt.py
+
+    - name: 安装 ANGLE
+      if: (inputs.platform == 'windows' || inputs.platform == 'macos') && steps.detect-deps.outputs.need-angle == 'true'
+      shell: bash
+      run: python ./misc/scripts/install_angle.py
+
+    - name: 安装 AccessKit
+      if: (inputs.platform == 'windows' || inputs.platform == 'macos') && steps.detect-deps.outputs.need-accesskit == 'true'
+      shell: bash
+      run: python ./misc/scripts/install_accesskit.py
+
+    - name: 安装 Vulkan SDK
+      if: inputs.platform == 'macos' && steps.detect-deps.outputs.need-vulkan == 'true'
+      shell: bash
+      run: bash misc/scripts/install_vulkan_sdk_macos.sh
+
+    - name: 安装 Swappy
+      if: inputs.platform == 'android'
+      shell: bash
+      run: python ./misc/scripts/install_swappy_android.py
+
+    - name: 扩展 detect-deps:after
+      if: inputs.hooks-bundle != ''
+      uses: ./ci-support/.github/actions/hooks
+      with:
+        anchor: detect-deps
+        phase: after
+        chain: build
+        hooks-bundle: ${{ inputs.hooks-bundle }}
+        context: context.json
+        plan: hooks-bundle/plan.json
+        bundle-dir: hooks-bundle
+        scons-flags: ${{ inputs.scons-flags }}
+
+    # --platform 用编译目标平台，不用 os.name。
+    - name: 补齐标准头
+      if: inputs.compat-standard-includes != 'off'
+      shell: bash
+      env:
+        INPUT_PLATFORM: ${{ inputs.platform }}
+      run: python "$GITHUB_ACTION_PATH/scripts/ensure_standard_includes.py" --platform "$INPUT_PLATFORM"
+
+    - name: 扩展 compile:before
+      if: inputs.hooks-bundle != ''
+      uses: ./ci-support/.github/actions/hooks
+      with:
+        anchor: compile
+        phase: before
+        chain: build
+        hooks-bundle: ${{ inputs.hooks-bundle }}
+        context: context.json
+        plan: hooks-bundle/plan.json
+        bundle-dir: hooks-bundle
+        scons-flags: ${{ inputs.scons-flags }}
+
+    - name: 编译
+      uses: ./ci-support/.github/actions/compile
+      with:
+        scons-cache: ${{ inputs.scons-cache }}
+        scons-flags: ${{ steps.normalize-hooks-result.outputs.merged-flags || inputs.scons-flags }}
+        platform: ${{ inputs.platform }}
+        target: ${{ inputs.target }}
+        build-profile-path: ${{ steps.inject-config.outputs.build-profile-path }}
+        scons-profile-path: ${{ steps.inject-config.outputs.scons-profile-path }}
+        custom-modules-dir: ${{ steps.inject-config.outputs.custom-modules-dir }}
+        encryption-key: ${{ inputs.encryption-key }}
+
+    - name: 扩展 compile:after
+      if: inputs.hooks-bundle != ''
+      uses: ./ci-support/.github/actions/hooks
+      with:
+        anchor: compile
+        phase: after
+        chain: build
+        hooks-bundle: ${{ inputs.hooks-bundle }}
+        context: context.json
+        plan: hooks-bundle/plan.json
+        bundle-dir: hooks-bundle
+        scons-flags: ${{ inputs.scons-flags }}
+
+    - name: 扩展 package:before
+      if: inputs.hooks-bundle != ''
+      uses: ./ci-support/.github/actions/hooks
+      with:
+        anchor: package
+        phase: before
+        chain: build
+        hooks-bundle: ${{ inputs.hooks-bundle }}
+        context: context.json
+        plan: hooks-bundle/plan.json
+        bundle-dir: hooks-bundle
+        scons-flags: ${{ inputs.scons-flags }}
+
+    - name: 应用扩展产物
+      if: inputs.hooks-bundle != ''
+      shell: bash
+      run: |
+        python "$GITHUB_ACTION_PATH/../../scripts/apply_hook_outputs.py" \
+          --result hooks-result.json --kind artifacts --dist "${{ github.workspace }}/bin"
+
+    # 编译后锚点失败须阻止保存缓存。
+    - name: 归一化扩展终态
+      id: normalize-final-state
+      if: inputs.hooks-bundle != ''
+      shell: bash
+      run: |
+        python "$GITHUB_ACTION_PATH/../../scripts/normalize_hooks_result.py" \
+        --fields post-build,source-hash
+
+    - name: 保存缓存
+      uses: ./ci-support/.github/actions/cache-save
+      with:
+        scons-cache: ${{ inputs.scons-cache }}
+        cache-key: ${{ inputs.cache-key }}
+        engine-sha: ${{ inputs.engine-sha }}
+        config-hash: ${{ steps.config-hash.outputs.config-hash }}
+        source-hash: ${{ steps.normalize-final-state.outputs.source-hash || steps.normalize-hooks-result.outputs.source-hash || '' }}
+        hooks-sha: ${{ inputs.hooks-sha }}
+        # 空值语义由 cache-save 定义（只有明确的 fail 才拒绝保存），此处不再拼兜底常量
+        post-build: ${{ steps.normalize-final-state.outputs.post-build }}
+      continue-on-error: true

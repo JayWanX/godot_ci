@@ -1,0 +1,98 @@
+name: 注入配置
+description: >-
+  注入 SCons profile 文件（经 scons profile= 传递）与 .gdbuild 内容，
+  检出自定义模块仓库，并导出 Godot PCK 加密密钥。所有用户输入仅经 env 传递。
+
+inputs:
+  profile:
+    description: >-
+      SCons profile 文件来源（profile.py）。空=不注入；语法见 docs/workflows.md「来源声明语法」：
+      "local:<path>"=从已检出项目工作区复制；"remote:<owner/repo>[@<ref>][:<path>]"=浅克隆远程仓库后复制。
+      路径经 profile= 传给 scons。
+    default: ""
+    type: string
+  build-profile:
+    description: >-
+      build profile（.gdbuild）来源。空=不注入；local:/remote: 语法同 profile。写入路径暴露为 build-profile 输出。
+    default: ""
+    type: string
+  custom-modules:
+    description: >-
+      逗号分隔的自定义模块来源条目（remote:/local: 语法，见「来源声明语法」）；
+      模块目录名由 register_types 注册名解析。
+    default: ""
+    type: string
+  project-root:
+    description: >-
+      项目工作区根的绝对路径（local: 条目的解析基准）。平台 job 由调用方检出项目到固定布局后传入。
+    default: ""
+    type: string
+  encryption-key:
+    description: >-
+      Godot PCK 加密密钥（十六进制字符串）。密钥格式校验；实际注入由编译 step 完成。空=不设置。
+    default: ""
+    type: string
+  repo-token:
+    description: >-
+      GitHub Token（PAT 或 GitHub App Token），用于 remote: 来源与 custom-modules 访问私有仓库。
+      经进程级 GIT_CONFIG_* 环境变量应用 git insteadOf 重写，不写入 ~/.gitconfig；克隆（含子模块）继承鉴权。空=仅可访问公开仓库。
+    default: ""
+    type: string
+
+outputs:
+  scons-profile-path:
+    description: 写入的 profile.py 绝对路径。未注入时为空。
+    value: ${{ steps.inject-profile.outputs.scons-profile-path }}
+  build-profile-path:
+    description: 写入的 .gdbuild 绝对路径。未注入时为空。
+    value: ${{ steps.inject-build-profile.outputs.build-profile-path }}
+  custom-modules-dir:
+    description: 已检出自定义模块所在目录的绝对路径。未要求时为空。
+    value: ${{ steps.inject-custom-modules.outputs.custom-modules-dir }}
+
+runs:
+  using: composite
+  steps:
+    - name: 注入 profile
+      id: inject-profile
+      shell: bash
+      env:
+        INPUT_PROFILE: ${{ inputs.profile }}
+        INPUT_PROJECT_ROOT: ${{ inputs.project-root }}
+        INPUT_REPO_TOKEN: ${{ inputs.repo-token }}
+      run: |
+        python "$GITHUB_ACTION_PATH/scripts/config_inject.py" place \
+          --source "$INPUT_PROFILE" --project-root "$INPUT_PROJECT_ROOT" \
+          --dest profile.py --label profile --output-key scons-profile-path
+
+    - name: 注入 .gdbuild
+      id: inject-build-profile
+      shell: bash
+      env:
+        INPUT_BUILD_PROFILE: ${{ inputs.build-profile }}
+        INPUT_PROJECT_ROOT: ${{ inputs.project-root }}
+        INPUT_REPO_TOKEN: ${{ inputs.repo-token }}
+      run: |
+        python "$GITHUB_ACTION_PATH/scripts/config_inject.py" place \
+          --source "$INPUT_BUILD_PROFILE" --project-root "$INPUT_PROJECT_ROOT" \
+          --dest project.gdbuild --label build-profile --output-key build-profile-path
+
+    - name: 检出/复制自定义模块
+      id: inject-custom-modules
+      shell: bash
+      env:
+        INPUT_CUSTOM_MODULES: ${{ inputs.custom-modules }}
+        INPUT_PROJECT_ROOT: ${{ inputs.project-root }}
+        INPUT_REPO_TOKEN: ${{ inputs.repo-token }}
+      run: |
+        python "$GITHUB_ACTION_PATH/scripts/config_inject.py" modules \
+          --entries "$INPUT_CUSTOM_MODULES" --project-root "$INPUT_PROJECT_ROOT" \
+          --dest-root custom_modules --output-key custom-modules-dir
+
+    - name: 校验 Godot PCK 加密密钥
+      shell: bash
+      env:
+        # 敏感值走 env，不经 argv
+        SCRIPT_AES256_ENCRYPTION_KEY: ${{ inputs.encryption-key }}
+      run: |
+        python "$GITHUB_ACTION_PATH/scripts/config_inject.py" check-key

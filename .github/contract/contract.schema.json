@@ -1,0 +1,267 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Godot CI 项目契约",
+  "description": "CI 与项目的唯一稳定契约面。字段变更直接改本 schema 与 CI 实现，不设版本/迁移层。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["engine", "build", "export", "artifacts"],
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "编辑器校验指针，其 URL 的 ref 段须与 ci.ref / 薄触发器 uses:@ref 一致；不是契约版本标记。"
+    },
+    "ci": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "ref"],
+      "description": "CI 资产仓库坐标。跨仓形态（薄触发器 uses: <ci.repository>/...@<ci.ref> 调用本仓库）必填，用于断言 $schema URL 的 ref 段 / ci.ref / 触发器 uses:@ref 三者一致；单仓自用（全套 .github 在项目仓库内自触发）可省略，此时检出路径由 job.workflow_repository 自动指向当前运行的这份工作流所属仓库。",
+      "properties": {
+        "repository": {
+          "type": "string",
+          "pattern": "^[^/]+/[^/]+$",
+          "description": "CI 资产仓库 owner/repo（跨仓形态的调用方仓库）"
+        },
+        "ref": {
+          "type": "string",
+          "minLength": 1,
+          "description": "CI 资产仓库 ref：分支/tag（跟随更新，默认 main）或 40 位 SHA（锁版本）；须与 $schema URL 的 ref 段及薄触发器 uses:@ref 一致"
+        }
+      }
+    },
+    "engine": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "target", "platform"],
+      "properties": {
+        "source": {
+          "type": "string",
+          "description": "引擎来源，裸写 owner/repo[@ref]（单形态字段，无来源前缀）；ref 为分支/tag/40 位 commit SHA。引擎源码即整个仓库，仓库根即引擎根"
+        },
+        "target": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["editor", "template_debug", "template_release"]
+          },
+          "minItems": 1,
+          "description": "编译目标档位（editor / template_debug / template_release），构建链按其展开"
+        },
+        "platform": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "linux",
+              "windows",
+              "macos",
+              "android",
+              "ios",
+              "visionos",
+              "web"
+            ]
+          },
+          "minItems": 1,
+          "description": "构建平台集合，平台 id 与平台基线 runner 键一致"
+        }
+      }
+    },
+    "build": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "paths": {
+          "type": "object",
+          "additionalProperties": false,
+          "default": {},
+          "description": "构建配置来源，语法同来源声明（前缀强制）。remote=从远程仓库取配置，local=项目仓库内的相对路径",
+          "properties": {
+            "profile": {
+              "type": "string",
+              "default": "local:build/profile.py",
+              "pattern": "^(remote:[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+(@[A-Za-z0-9._+/-]+)?(:[A-Za-z0-9_./-]+)?|local:[A-Za-z0-9_./-]+)$",
+              "description": "SCons profile 脚本来源（remote:/local:），供 detect-deps 提取 SDK 判据；local 指向的文件缺失时 notice 并跳过"
+            },
+            "build_profile": {
+              "type": "string",
+              "default": "local:build/project.gdbuild",
+              "pattern": "^(remote:[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+(@[A-Za-z0-9._+/-]+)?(:[A-Za-z0-9_./-]+)?|local:[A-Za-z0-9_./-]+)$",
+              "description": "build profile（.gdbuild）来源（remote:/local:）；经 scons build_profile= 传递"
+            }
+          }
+        },
+        "modules": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^(remote:[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+(@[A-Za-z0-9._+/-]+)?(:[A-Za-z0-9_./-]+)?|local:[A-Za-z0-9_./-]+)$"
+          },
+          "default": [],
+          "description": "自定义模块来源清单，条目语法见 workflows.md「来源声明语法」：remote=仓库（整仓或 :path 子目录）作为模块，local=项目内模块目录；模块目录名由 register_types 注册名解析，重复条目 fail-fast"
+        },
+        "scons_flags": {
+          "type": "string",
+          "default": "",
+          "description": "附加 SCons 标志；与平台 matrix 的编译选项合并"
+        },
+        "compat": {
+          "type": "object",
+          "additionalProperties": false,
+          "default": {},
+          "description": "引擎兼容行为开关",
+          "properties": {
+            "standard_includes": {
+              "type": "string",
+              "enum": ["auto", "on", "off"],
+              "default": "auto",
+              "description": "标准 include 兼容层：auto=跟随平台基线（compat.default 底值 + skip 规则单向关闭）；on/off 强制"
+            }
+          }
+        },
+        "toolchain": {
+          "type": "object",
+          "additionalProperties": false,
+          "default": {},
+          "description": "覆写平台基线的工具链版本号；键集固定，拼错即 resolve 期 fail-fast。编辑器档案不在此，按平台见 platforms.<平台>.editor_archive",
+          "properties": {
+            "emsdk": { "type": "string" },
+            "java": { "type": "string" },
+            "scons": { "type": "string" }
+          }
+        }
+      }
+    },
+    "export": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["official", "custom_build"],
+          "default": "custom_build",
+          "description": "导出模式：official=官方编辑器；custom_build=自编译引擎"
+        },
+        "editor_version": {
+          "type": "string",
+          "default": "",
+          "description": "官方编辑器版本；custom_build 时须与引擎 ref 兼容"
+        },
+        "presets": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "导出预设白名单；留空=项目全部预设；名单须存在于 export_presets.cfg，缺失 fail-fast"
+        },
+        "paths": {
+          "type": "object",
+          "additionalProperties": false,
+          "default": {},
+          "properties": {
+            "project_godot": {
+              "type": "string",
+              "default": "project.godot",
+              "description": "Godot 项目配置文件相对项目根的路径"
+            },
+            "export_presets": {
+              "type": "string",
+              "default": "export_presets.cfg",
+              "description": "导出预设文件相对项目根的路径"
+            },
+            "dist": {
+              "type": "string",
+              "default": "bin",
+              "description": "导出产物目录相对项目根的路径"
+            }
+          }
+        }
+      }
+    },
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "prefix": {
+          "type": "string",
+          "default": "",
+          "pattern": "^[A-Za-z0-9._-]*$",
+          "description": "产物名前缀；空则由 resolve 取仓库名安全形式。仅允许 [A-Za-z0-9._-]（产物名会进 shell 上下文，）"
+        },
+        "build_naming": {
+          "type": "string",
+          "default": "{prefix}_{platform}_{target}",
+          "description": "编译产物命名模板。占位符：{prefix} {platform} {target} {arch} {variant}；未知占位符 resolve 期 fail-fast。模板未含 {arch}/{variant} 时按维度追加后缀（android 默认 arm64，macOS 单架构、web 变体、android 变体产物带维度段）。"
+        },
+        "export_naming": {
+          "type": "string",
+          "default": "{prefix}_{preset}",
+          "description": "导出产物（交付包 / Release 附件）命名模板。占位符：{prefix} {platform} {preset}（preset = 预设名的 safe 形式）；未知占位符 resolve 期 fail-fast。默认不拼 {platform}：Godot 预设名普遍自带平台（macOS / Windows Desktop / Linux/X11），再拼平台会重复成 windows_windows_desktop。预设名跨平台通用时改用 {prefix}_{platform}_{preset}。渲染结果跨全部选中预设去重，同名直接 fail-fast（Release 附件同名会互相覆盖）。"
+        },
+        "retention": {
+          "type": "object",
+          "additionalProperties": false,
+          "default": {},
+          "description": "产物保留天数（覆写基线同名键）：build=平台构建产物 / prefetch=编辑器与导出模板预取中转物 / export=导出产物 / contract=契约与上下文中转件",
+          "properties": {
+            "build": { "type": "integer", "minimum": 1, "default": 7 },
+            "prefetch": { "type": "integer", "minimum": 1, "default": 1 },
+            "export": { "type": "integer", "minimum": 1, "default": 30 },
+            "contract": { "type": "integer", "minimum": 1, "default": 1 }
+          }
+        }
+      }
+    },
+    "roles": {
+      "type": "object",
+      "additionalProperties": false,
+      "default": {},
+      "description": "覆写平台基线 roles 段的链级作业 runner（publish / upload）。与平台无关的操作（发布、打包上传）在此配置。resolve 不在其中：resolve 作业的 runner 分配先于契约可读（runs-on 求值不依赖任何 step 输出），由平台基线唯一决定，故 schema 层面不提供该键。",
+      "properties": {
+        "publish": { "type": "string" },
+        "upload": { "type": "string" }
+      }
+    },
+    "platforms": {
+      "type": "object",
+      "default": {},
+      "description": "按平台覆写基线 platforms 段的字段（逐平台逐字段深合并，未声明字段沿用基线）。可覆写：build_runner（构建作业 runner）/ export_runner（导出作业 runner，改原生即可做代码签名）/ editor_archive（导出用编辑器档案后缀）/ variants（构建变体）。",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "build_runner": { "type": "string" },
+          "export_runner": { "type": "string" },
+          "editor_archive": { "type": "string" },
+          "variants": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["variant"],
+              "properties": {
+                "variant": { "type": "string" },
+                "scons_flags": { "type": "string" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "hooks": {
+      "type": "object",
+      "additionalProperties": false,
+      "default": {},
+      "properties": {
+        "manifest": {
+          "type": "string",
+          "default": ".github/ci-hooks.json",
+          "description": "扩展清单相对项目根的路径；文件不存在 = 不启用扩展"
+        },
+        "policy": {
+          "type": "string",
+          "enum": ["off", "declared"],
+          "default": "off",
+          "description": "扩展策略：off=忽略清单（缺省值，省略 hooks 段亦如此）；declared=显式启用，只执行清单声明的钩子"
+        }
+      }
+    }
+  }
+}
