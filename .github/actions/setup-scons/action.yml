@@ -1,0 +1,37 @@
+name: 安装 SCons
+description: >-
+  安装 Python 与 pip 版 SCons；另注册编译问题匹配器
+  （依赖引擎仓库的 misc/utility/problem-matchers.json）。
+
+inputs:
+  python-version:
+    description: 要使用的 Python 版本。
+    default: 3.x
+  python-architecture:
+    description: Python 架构。
+    default: x64
+  scons-version:
+    description: 要使用的 SCons 版本（平台基线 toolchain.scons，由 build-pipeline 传入）。
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: 安装 Python
+      uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+      with:
+        python-version: ${{ inputs.python-version }}
+        architecture: ${{ inputs.python-architecture }}
+
+    - name: 安装 SCons
+      shell: bash
+      env:
+        INPUT_SCONS_VERSION: ${{ inputs.scons-version }}
+      run: |
+        python -c "import sys; print(sys.version)"
+        python -m pip install --disable-pip-version-check "scons==$INPUT_SCONS_VERSION"
+        scons --version
+
+    - name: 注册编译问题匹配器
+      shell: bash
+      run: echo ::add-matcher::misc/utility/problem-matchers.json

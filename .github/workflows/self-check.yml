@@ -1,0 +1,54 @@
+name: 🧪 CI Self-check
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+  # 手动触发：无 inputs（跑全量检查）。真实需求有三类——
+  # ① 只想复验一次而不想推提交；② 平台基线/工具链版本改动后立即验证；
+  # ③ runner 镜像迁移前（如 ubuntu-latest 升 26.04）预演 PyYAML 与脚本行为。
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # Chain Runner Bootstrap（workflows/runner.yml）：自检环境随基线 roles.resolve 变。
+  runner:
+    name: 引导链式运行器
+    uses: $/.github/workflows/runner.yml
+
+  self-check:
+    name: 静态校验与自测
+    needs: runner
+    runs-on: ${{ fromJSON(needs.runner.outputs.runner-json).resolve }}
+    timeout-minutes: 15
+    steps:
+      - name: 检出
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: 安装 PyYAML
+        run: python -m pip install --quiet pyyaml
+      - name: CI 资产静态校验
+        run: python .github/scripts/check_ci_assets.py
+      - name: 单元测试
+        run: |
+          # 逐套件捕获输出：通过时只留末行（「x/x 通过」），失败才全量回显。
+          # 测试里的 fail-fast 用例会走生产代码的 ::error:: 打印路径，若直接把
+          # 输出接到 step 日志，GitHub 的日志扫描器会把它们抽成界面 annotation；
+          # 每 step 只显示前 10 条 error，真实失败会被这些预期噪声挤掉。
+          # 测试侧已用 testlib 捕获这些输出（不泄漏），这里再兜一层：
+          # 任何漏网的标记在通过时都不进日志。
+          set -uo pipefail
+          failed=0
+          for f in .github/tests/test_*.py; do
+            name=$(basename "$f")
+            if out=$(python "$f" 2>&1); then
+              echo "✓ $name — $(printf '%s\n' "$out" | grep -E '通过|PASS' | tail -1)"
+            else
+              echo "✗ $name"
+              printf '%s\n' "$out"
+              failed=1
+            fi
+          done
+          [ "$failed" -eq 0 ] || { echo "::error::单元测试存在失败套件（上方为完整输出）"; exit 1; }

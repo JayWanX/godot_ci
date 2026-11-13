@@ -1,0 +1,327 @@
+name: ~ 🍎 macOS Build
+
+on:
+  workflow_call:
+    inputs:
+      runs-on:
+        description: 运行器标签（由 build.yml 从平台基线运行器映射下传）。
+        required: true
+        type: string
+      engine-repo:
+        description: Godot 引擎源码仓库（owner/repo）。
+        required: true
+        type: string
+      repo-safe:
+        description: 项目仓库 `owner/repo` 的末段名（产物名前缀）。
+        required: false
+        default: ""
+        type: string
+      engine-sha:
+        description: 引擎 ref 解析出的 commit SHA（缓存键稳定性依据）。
+        required: false
+        default: ""
+        type: string
+      engine-ref:
+        description: 引擎源码的分支、tag 或 commit SHA。
+        required: true
+        type: string
+      target:
+        description: 构建目标（editor, template_debug, template_release）。
+        required: false
+        default: editor
+        type: string
+      scons-flags:
+        description: 附加 SCons 编译标志。
+        required: false
+        default: ""
+        type: string
+      profile:
+        description: >-
+          custom.py 来源（空=跳过；local:<path> 或
+          remote:<owner/repo>[@<ref>][:<path>]）。
+        required: false
+        default: ""
+        type: string
+      build-profile:
+        description: >-
+          build profile（.gdbuild）来源（空=跳过；local:<path> 或
+          remote:<owner/repo>[@<ref>][:<path>]）。
+        required: false
+        default: ""
+        type: string
+      custom-modules:
+        description: '自定义模块来源条目，逗号分隔（remote:/local: 语法，见「来源声明语法」）。'
+        required: false
+        default: ""
+        type: string
+      project-repo:
+        description: '待构建项目仓库 owner/repo（空=手动触发未提供，local: 来源不可用）。'
+        required: false
+        default: ""
+        type: string
+      project-ref:
+        description: 项目仓库 ref。
+        required: false
+        default: ""
+        type: string
+      upload-artifacts:
+        description: 是否上传编译产物到 Artifacts。workflow_call 由 build.yml 传，false 时跳过上传。
+        required: false
+        default: true
+        type: boolean
+      compat-standard-includes:
+        description: 归一化的 standard_includes（on/off）。
+        required: false
+        default: "on"
+        type: string
+      retention-build:
+        description: 编译产物保留天数。
+        required: false
+        default: "7"
+        type: string
+      toolchain-json:
+        description: 工具链版本 JSON。
+        required: false
+        default: "{}"
+        type: string
+      hooks-bundle:
+        description: 扩展包 artifact 名（空=未启用）。
+        required: false
+        default: ""
+        type: string
+      hooks-sha:
+        description: 扩展包摘要（空=未启用）。
+        required: false
+        default: ""
+        type: string
+      ci-repository:
+        description: CI 资产仓库 owner/repo（跨仓形态取契约 ci.repository；单仓自用留空）。
+        required: false
+        default: ""
+        type: string
+      ci-ref:
+        description: CI 资产仓库 ref（跨仓形态取契约 ci.ref；单仓自用留空）。
+        required: false
+        default: ""
+        type: string
+      artifact-prefix:
+        description: 产物名前缀（契约 artifacts.prefix；空则取仓库名安全形式）。
+        required: false
+        default: ""
+        type: string
+      artifact-build-naming:
+        description: 产物命名模板（契约 artifacts.build_naming）；留空则读契约 schema 的默认值。
+        required: false
+        default: ""
+        type: string
+    secrets:
+      GIT_PAT:
+        description: "私有仓库访问令牌（remote: 来源与自定义模块）。"
+        required: false
+      ENCRYPTION_KEY:
+        description: "Godot PCK 加密密钥（十六进制）。空=不加密。"
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  # 两架构并行各自上传 <name>_<arch>，由 merge job 汇总为 universal。
+  build:
+    name: macOS 编译 ${{ matrix.arch }}
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 120
+    env:
+      CACHE_KEY: macos_${{ inputs.target }}_${{ matrix.arch }}
+      # secret:<NAME> 钩子能力的值通道：job 级 env 按固定名注入，
+      # run_hooks 执行器按清单声明挑出、仅注入该 hook 子进程；不落日志。
+      GIT_PAT: ${{ secrets.GIT_PAT }}
+      ENCRYPTION_KEY: ${{ secrets.ENCRYPTION_KEY }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, arm64]
+    steps:
+      - name: 检出引擎源码
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ inputs.engine-repo }}
+          ref: ${{ inputs.engine-ref }}
+          token: ${{ secrets.GIT_PAT || github.token }}
+          submodules: recursive
+
+      - name: 检出 CI 资产
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ inputs.ci-repository != '' && inputs.ci-repository || job.workflow_repository || github.repository }}
+          ref: ${{ inputs.ci-repository != '' && inputs.ci-ref || job.workflow_sha || github.sha }}
+          token: ${{ secrets.GIT_PAT || github.token }}
+          path: ci-support
+          fetch-depth: 1
+          filter: blob:none
+          sparse-checkout: .github
+
+      - name: 准备构建
+        uses: ./ci-support/.github/actions/prepare-build
+        with:
+          platform: macos
+          target: ${{ inputs.target }}
+          arch: ${{ matrix.arch }}
+          variant: ""
+          artifact-build-naming: ${{ inputs.artifact-build-naming }}
+          artifact-prefix: ${{ inputs.artifact-prefix }}
+          repo-safe: ${{ inputs.repo-safe }}
+          project-repo: ${{ inputs.project-repo }}
+          project-ref: ${{ inputs.project-ref }}
+          repo-token: ${{ secrets.GIT_PAT || github.token }}
+
+      - name: 编译
+        uses: ./ci-support/.github/actions/build-pipeline
+        with:
+          platform: macos
+          target: ${{ inputs.target }}
+          cache-key: ${{ env.CACHE_KEY }}
+          engine-sha: ${{ inputs.engine-sha }}
+          # arch 段是本平台的 matrix 维度，随 scons-flags 一并下发
+          scons-flags: ${{ inputs.scons-flags }} arch=${{ matrix.arch }}
+          profile: ${{ inputs.profile }}
+          build-profile: ${{ inputs.build-profile }}
+          custom-modules: ${{ inputs.custom-modules }}
+          encryption-key: ${{ secrets.ENCRYPTION_KEY }}
+          repo-token: ${{ secrets.GIT_PAT }}
+          compat-standard-includes: ${{ inputs.compat-standard-includes }}
+          hooks-bundle: ${{ inputs.hooks-bundle }}
+          hooks-sha: ${{ inputs.hooks-sha }}
+          toolchain-json: ${{ inputs.toolchain-json }}
+
+      - name: 清理产物
+        shell: bash
+        run: |
+          rm -rf ./bin/build_deps
+          strip bin/godot.* 2>/dev/null || true
+          chmod +x bin/godot.*
+
+      # 单架构产物名带 _<arch> 段（prepare-build 渲染）；只在允许上传时上传，
+      # 否则本 job 产物无法跨 job 传给 merge。
+      - name: 打包并上传单架构产物
+        if: inputs.upload-artifacts
+        uses: ./ci-support/.github/actions/package-artifact
+        with:
+          artifact-name: ${{ env.ARTIFACT }}
+          retention-days: ${{ inputs.retention-build }}
+          enabled: true
+
+  # 独立 merge job：两架构产物就绪后 lipo 合并为 universal，产物名去掉 _<arch> 段。
+  merge:
+    name: macOS 合并 universal
+    needs: build
+    if: inputs.upload-artifacts
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 30
+    env:
+      # run 块只用普通 shell 变量，INPUT_TARGET 在这里显式定义（原实现缺此定义）。
+      INPUT_TARGET: ${{ inputs.target }}
+    steps:
+      - name: 检出 CI 资产
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ inputs.ci-repository != '' && inputs.ci-repository || job.workflow_repository || github.repository }}
+          ref: ${{ inputs.ci-repository != '' && inputs.ci-ref || job.workflow_sha || github.sha }}
+          token: ${{ secrets.GIT_PAT || github.token }}
+          path: ci-support
+          fetch-depth: 1
+          filter: blob:none
+          sparse-checkout: .github
+
+      - name: 准备构建
+        uses: ./ci-support/.github/actions/prepare-build
+        with:
+          platform: macos
+          target: ${{ inputs.target }}
+          arch: ""
+          variant: ""
+          artifact-build-naming: ${{ inputs.artifact-build-naming }}
+          artifact-prefix: ${{ inputs.artifact-prefix }}
+          repo-safe: ${{ inputs.repo-safe }}
+          project-repo: ""
+          project-ref: ""
+          repo-token: ${{ secrets.GIT_PAT || github.token }}
+
+      # macos_template.app 脚手架随引擎版本变化，打包模板 zip 必须取当前引擎源码里的
+      - name: 检出脚手架
+        if: inputs.target != 'editor'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ inputs.engine-repo }}
+          ref: ${{ inputs.engine-ref }}
+          token: ${{ secrets.GIT_PAT || github.token }}
+          path: engine-src
+          fetch-depth: 1
+          filter: blob:none
+          sparse-checkout: misc/dist
+
+      - name: 下载架构产物
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          # universal 名不带 _<arch>，两架构产物名以它为前缀
+          pattern: ${{ env.ARTIFACT }}_*
+          path: build/
+          merge-multiple: true
+
+      - name: 解压架构产物
+        uses: ./ci-support/.github/actions/unpack-7z
+        with:
+          archive-dir: build
+
+      - name: 合并通用二进制
+        shell: bash
+        run: |
+          # editor 构建带 dSYM 目录，其中 DWARF 文件会混入下方通配，先清掉
+          find ./build -name '*.dSYM' -type d -exec rm -rf {} +
+          # 中段可变（precision=double 等），前后通配保兼容
+          lipo -create ./build/godot.macos.$INPUT_TARGET*x86_64* ./build/godot.macos.$INPUT_TARGET*arm64* -output ./build/godot.macos.$INPUT_TARGET.universal
+          rm -f ./build/godot.macos.$INPUT_TARGET*x86_64* ./build/godot.macos.$INPUT_TARGET*arm64*
+          strip ./build/godot.macos.$INPUT_TARGET.universal 2>/dev/null || true
+          chmod +x ./build/godot.macos.$INPUT_TARGET.universal
+
+      # macOS 导出模板必须是含 macos_template.app 的 zip（官方布局），裸 universal 二进制不被导出接受
+      - name: 打包模板 zip
+        if: inputs.target != 'editor'
+        shell: bash
+        run: |
+          cp -R engine-src/misc/dist/macos_template.app ./macos_template.app
+          mkdir -p ./macos_template.app/Contents/MacOS
+          # zip 内二进制名须为 godot_macos_<release|debug>.universal（官方约定，导出时按此查找）
+          KIND=$([ "$INPUT_TARGET" = "template_release" ] && echo release || echo debug)
+          cp "./build/godot.macos.$INPUT_TARGET.universal" "./macos_template.app/Contents/MacOS/godot_macos_${KIND}.universal"
+          chmod +x "./macos_template.app/Contents/MacOS/godot_macos_${KIND}.universal"
+          mkdir -p bin
+          zip -q -r bin/macos.zip macos_template.app
+
+      # 编辑器构建：universal 二进制直接作为产物，与 package-artifact 的 bin/ 布局对齐
+      - name: 组织编辑器产物
+        if: inputs.target == 'editor'
+        shell: bash
+        run: |
+          mkdir -p bin
+          cp "./build/godot.macos.$INPUT_TARGET.universal" "bin/godot.macos.$INPUT_TARGET.universal"
+
+      # 导出模板不带编辑器功能，--version 未必可跑，改为校验 zip 内容
+      - name: 冒烟测试
+        if: inputs.target != 'editor'
+        shell: bash
+        run: |
+          unzip -l bin/macos.zip | grep -q 'Contents/MacOS/godot_macos_' \
+            || { echo "::error::macos.zip 内缺少模板二进制"; exit 1; }
+
+      - name: 编辑器冒烟测试
+        if: inputs.target == 'editor'
+        shell: bash
+        run: ./bin/godot.macos.$INPUT_TARGET.universal --version
+
+      - name: 打包并上传产物
+        uses: ./ci-support/.github/actions/package-artifact
+        with:
+          artifact-name: ${{ env.ARTIFACT }}
+          retention-days: ${{ inputs.retention-build }}
+          enabled: true

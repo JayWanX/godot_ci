@@ -1,0 +1,64 @@
+name: 运行扩展钩子
+description: >-
+  锚点 dispatcher：按 (anchor,phase) 执行 plan.json 中订阅的钩子。
+  无 outputs，结果统一写 hooks-result.json；不下载 bundle，只消费已就位的 bundle-dir。
+
+inputs:
+  anchor:
+    description: 锚点 id（须存在于 hooks-anchors.json，如 inject-config / package）。
+    required: true
+  phase:
+    description: 锚点相位 before | after。
+    required: true
+  chain:
+    description: 链 build | export | release，用于与 context.json 的 chain 比对。
+    required: false
+    default: ""
+  hooks-bundle:
+    description: resolve 输出的 bundle artifact 名；空串 = 未启用扩展，整条扩展链短路。
+    required: false
+    default: ""
+  context:
+    description: context.json 路径（只读上下文）。
+    required: false
+    default: context.json
+  plan:
+    description: plan.json 路径（留空则用 <bundle-dir>/plan.json）。
+    required: false
+    default: ""
+  bundle-dir:
+    description: 已就位的扩展包解压目录（含 plan.json / scripts/ / sha256）。
+    required: false
+    default: hooks-bundle
+  scons-flags:
+    description: 平台 workflow 追加后的完整 SCons 标志（钩子写 scons_flags 时的合并基准）。
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    # hooks-bundle 为空时短路：不跑执行器、不写结果文件（文件不存在=空转）。
+    - name: 执行钩子
+      if: inputs.hooks-bundle != ''
+      shell: bash
+      env:
+        # INPUT_* = inputs.* 透传；EXEC / GODOT_HOOK_* 是 action 内部布局常量
+        EXEC: ${{ github.action_path }}/../../scripts/run_hooks.py
+        INPUT_ANCHOR: ${{ inputs.anchor }}
+        INPUT_PHASE: ${{ inputs.phase }}
+        INPUT_CHAIN: ${{ inputs.chain }}
+        INPUT_BUNDLE_DIR: ${{ inputs.bundle-dir }}
+        INPUT_CONTEXT: ${{ inputs.context }}
+        INPUT_PLAN: ${{ inputs.plan }}
+        INPUT_SCONS_FLAGS: ${{ inputs.scons-flags }}
+        GODOT_HOOK_ROOT: ${{ github.workspace }}/.godot-hooks/${{ inputs.anchor }}-${{ inputs.phase }}
+        GODOT_HOOK_PYTHON: python
+        GODOT_HOOK_BASH: bash
+      run: |
+        args=(dispatch --bundle "$INPUT_BUNDLE_DIR" --anchor "$INPUT_ANCHOR" \
+              --phase "$INPUT_PHASE" --context "$INPUT_CONTEXT" --result hooks-result.json)
+        [ -n "$INPUT_PLAN" ] && args+=(--plan "$INPUT_PLAN")
+        [ -n "$INPUT_CHAIN" ] && args+=(--chain "$INPUT_CHAIN")
+        [ -n "$INPUT_SCONS_FLAGS" ] && args+=(--scons-flags "$INPUT_SCONS_FLAGS")
+        python "$EXEC" "${args[@]}"

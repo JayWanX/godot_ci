@@ -1,0 +1,429 @@
+name: ~ 📤 Platform Export
+
+# 由 export.yml 通过 workflow_call 调用的单平台导出工作流；平台差异全部由 inputs 表达。
+# sparse-checkout 额外包含 hooks 与 .github/scripts，供扩展机制使用。
+
+on:
+  workflow_call:
+    inputs:
+      project-repo:
+        description: 待导出项目仓库 owner/repo。
+        required: true
+        type: string
+      project-ref:
+        description: 待导出项目 ref。
+        required: true
+        type: string
+      presets:
+        description: 本平台要导出的预设名，逗号分隔（由调用方传 resolve 的 presets-<平台>）。
+        required: true
+        type: string
+      packages:
+        description: 本平台预设打包矩阵 JSON（[{preset, preset-safe, package}]，resolve 归一化必传；package 名 resolve 期已定死，逐预设上传 matrix 的数据源）。
+        required: true
+        type: string
+      # 导出链恒用 template_release 模板（导出成品是发行态游戏，不是 template_debug）。
+      # 该维度不做成 input：调用方（export.yml）本就不传，做成 input 只会得到一个
+      # 「永远等于默认值」的死输入，而手工传 template_debug 会下载 release 模板却用
+      # --export-debug 导出，产出的包与模板不匹配。
+      editor-version:
+        description: 官方编辑器版本。
+        required: true
+        type: string
+      export-type:
+        description: official / custom_build。
+        required: true
+        type: string
+      repo-safe:
+        description: 项目仓库 `owner/repo` 的末段名（产物名前缀）。
+        required: true
+        type: string
+      platform:
+        description: 契约平台名（linux/windows/macos/android/ios/visionos/web）。
+        required: true
+        type: string
+      templates-pattern:
+        description: 自编译模板 artifact 的下载 pattern（含 repo-safe 前缀，由调用方提供）。
+        required: false
+        default: ""
+        type: string
+      project-godot:
+        description: Godot 项目配置文件相对项目根的路径（契约 export.paths.project_godot，resolve 必传）。
+        required: true
+        type: string
+      export-presets-path:
+        description: 导出预设文件相对项目根的路径（契约 export.paths.export_presets，resolve 必传）。
+        required: true
+        type: string
+      dist-dir:
+        description: 导出产物目录相对项目根的路径（契约 export.paths.dist，resolve 必传）。
+        required: true
+        type: string
+      ci-repository:
+        description: >-
+          CI 资产仓库 owner/repo（跨仓形态取契约 ci.repository；单仓自用留空，
+          此时从本次运行所属仓库检出）。
+        required: false
+        default: ""
+        type: string
+      ci-ref:
+        description: >-
+          CI 资产仓库 ref（跨仓形态取契约 ci.ref；单仓自用留空，此时用本次运行的 commit）。
+        required: false
+        default: ""
+        type: string
+      editor-platform:
+        description: 官方编辑器下载平台（ios/visionos 用 macos.universal，其余 linux.x86_64）。
+        required: false
+        default: linux.x86_64
+        type: string
+      runs-on:
+        description: 运行器标签（导出 job；由调用方从平台基线运行器映射下传）。
+        required: true
+        type: string
+      upload-runs-on:
+        description: 上传 job 运行器标签（由调用方从平台基线 runner.upload 下传；纯打包/上传文件操作）。
+        required: true
+        type: string
+      need-android-sdk:
+        description: 是否安装 Android SDK 与 JDK。
+        required: false
+        default: false
+        type: boolean
+      need-ios-cert:
+        description: 是否可能导入 Apple 签名证书（ios/visionos）。
+        required: false
+        default: false
+        type: boolean
+      upload-artifacts:
+        description: 是否上传导出产物。
+        required: false
+        default: true
+        type: boolean
+      retention-export:
+        description: 导出产物保留天数。
+        required: false
+        default: "30"
+        type: string
+      hooks-bundle:
+        description: 扩展包 artifact 名（空=未启用，整条扩展链短路）。
+        required: false
+        default: ""
+        type: string
+      hooks-sha:
+        description: 扩展包摘要（空=未启用）。
+        required: false
+        default: ""
+        type: string
+      caller-uses-ref:
+        description: '调用方 uses: …@<ref> 里的 ref；生成 context.json 时断言与契约 ci.ref 一致。'
+        required: false
+        default: ""
+        type: string
+    secrets:
+      GIT_PAT:
+        description: 私有仓库访问令牌。
+        required: false
+      ENCRYPTION_KEY:
+        description: Godot PCK 加密密钥（十六进制）。
+        required: false
+      IOS_CERT_B64:
+        description: Apple 签名证书（base64 编码的 p12）。
+        required: false
+      IOS_CERT_PASS:
+        description: Apple 签名证书密码。
+        required: false
+
+jobs:
+  export:
+    name: 导出成品
+    # 本平台无预设时跳过整个 job（原 export.yml 在 job 级 if 用 matrix 判定，失效）。
+    if: inputs.presets != ''
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 60
+    outputs:
+      # 逐预设上传 matrix 的数据源；post-export 状态门控 upload job（钩子失败 ⇒ 不发布）
+      packages: ${{ inputs.packages }}
+      post-export-status: ${{ steps.post-export.outputs.post-export }}
+    env:
+      # secrets 不能用在 step.if，故在 job 级 env 暴露布尔标志；证书本体仍由 action 直接读取。
+      # 仅 ios/visionos（need-ios-cert=true）时才求值证书存在性，其余平台恒 false。
+      HAS_IOS_CERT: ${{ inputs.need-ios-cert && secrets.IOS_CERT_B64 != '' }}
+      # secret:<NAME> 钩子能力的值通道：按固定名注入，执行器按清单声明挑出、仅注入该 hook 子进程。
+      GIT_PAT: ${{ secrets.GIT_PAT }}
+      ENCRYPTION_KEY: ${{ secrets.ENCRYPTION_KEY }}
+      IOS_CERT_B64: ${{ secrets.IOS_CERT_B64 }}
+      IOS_CERT_PASS: ${{ secrets.IOS_CERT_PASS }}
+      # Windows 原生导出（export_runner 改 windows-2022 的签名场景）下中文输出走
+      # cp1252 管道会 UnicodeEncodeError 掩盖真实错误；与 windows-build.yml:130 同口径
+      PYTHONIOENCODING: utf8
+    steps:
+      - name: 检出待导出项目
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ inputs.project-repo }}
+          ref: ${{ inputs.project-ref }}
+          token: ${{ secrets.GIT_PAT || github.token }}
+          path: project
+
+      # 跨仓形态：从契约 ci.repository + ci.ref 检出到 ci-support/，鉴权用 GIT_PAT。
+      # 单仓自用（ci 为空）：从本次运行所属仓库检出，ci-support/ 布局不变。
+      - name: 检出 CI 资产
+        if: inputs.ci-repository != ''
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ inputs.ci-repository }}
+          ref: ${{ inputs.ci-ref }}
+          token: ${{ secrets.GIT_PAT || github.token }}
+          path: ci-support
+          filter: blob:none
+          sparse-checkout: |
+            .github/actions/export
+            .github/actions/unpack-7z
+            .github/actions/hooks
+            .github/contract
+            .github/scripts
+            # 导出链不经 config-inject：hooks bundle 自带执行器脚本
+
+      - name: 检出 CI 资产
+        if: inputs.ci-repository == ''
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ job.workflow_repository || github.repository }}
+          ref: ${{ job.workflow_sha || github.sha }}
+          token: ${{ secrets.GIT_PAT || github.token }}
+          path: ci-support
+          filter: blob:none
+          sparse-checkout: |
+            .github/actions/export
+            .github/actions/unpack-7z
+            .github/actions/hooks
+            .github/contract
+            .github/scripts
+            # 导出链不经 config-inject：hooks bundle 自带执行器脚本
+
+      # 输入一致性守卫（防误用）：packages 的 preset-safe 必须与 presets 的收敛结果
+      # 一致、package 名必须无重复。导出链经 resolve 归一化天然一致；不一致会让上传
+      # matrix 找不到产物子目录或产出同名 zip（Release 附件互相覆盖），这里在流程开始就失败。
+      - name: 校验打包矩阵
+        shell: bash
+        env:
+          INPUT_PRESETS: ${{ inputs.presets }}
+          INPUT_PACKAGES: ${{ inputs.packages }}
+        run: |
+          python ci-support/.github/scripts/preset_name.py --validate-packages \
+          --preset-names "$INPUT_PRESETS" --packages "$INPUT_PACKAGES"
+
+      - name: 下载预取产物
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: ${{ inputs.repo-safe }}_editor_*
+          path: prefetched
+          merge-multiple: true
+
+      - name: 下载官方模板
+        if: inputs.export-type == 'official'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ inputs.repo-safe }}_export-templates
+          path: prefetched
+
+      - name: 下载构建的模板
+        if: inputs.export-type == 'custom_build'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: templates
+          pattern: ${{ inputs.templates-pattern }}
+          merge-multiple: true
+
+      - name: 解压模板
+        if: inputs.export-type == 'custom_build'
+        uses: ./ci-support/.github/actions/unpack-7z
+
+      # ---- 扩展链（无清单时本节全部短路）----
+      - name: 下载扩展包
+        if: inputs.hooks-bundle != ''
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ inputs.hooks-bundle }}
+          path: hooks-bundle
+
+      - name: 生成运行时上下文
+        if: inputs.hooks-bundle != ''
+        shell: bash
+        env:
+          CI_CONTRACT: project/.github/ci-contract.json
+          PROJECT_ROOT: ${{ github.workspace }}/project
+          # 导出 job 工作区无引擎源码，ENGINE_ROOT 显式传空（「未配置」是事实；
+          # 口径见 docs/hooks.md「只读上下文」）
+          ENGINE_ROOT: ""
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          WORKFLOW_REPOSITORY: ${{ job.workflow_repository || github.repository }}
+          GITHUB_SHA: ${{ github.sha }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_WORKSPACE: ${{ github.workspace }}
+          RUNNER_OS: ${{ runner.os }}
+          REPO_SAFE: ${{ inputs.repo-safe }}
+          CALLER_USES_REF: ${{ inputs.caller-uses-ref }}
+          # 本平台本次实际导出的预设名单（context.export.presets，on.presets 过滤依据）
+          EXPORT_PRESETS_ACTUAL: ${{ inputs.presets }}
+          # 用户可控输入经 env 注入：shell 先于脚本白名单校验执行，
+          # 不把 inputs.* 内联进命令行。target 恒为 template_release（见 inputs 注释）
+          EXPORT_TARGET: template_release
+          INPUT_PLATFORM: ${{ inputs.platform }}
+        run: |
+          python ci-support/.github/scripts/godot_context.py --resolve --chain export \
+            --target "$EXPORT_TARGET" --platform "$INPUT_PLATFORM" --out context.json
+
+      - name: 安装 Android SDK 与 JDK
+        if: inputs.need-android-sdk
+        uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4
+
+      - name: 导入 Apple 签名证书
+        if: env.HAS_IOS_CERT == 'true'
+        uses: apple-actions/import-codesign-certs@288b8ec97b82c66b6f2a6baaf7acc8dfbcbe331c # v7
+        with:
+          p12-file-base64: ${{ secrets.IOS_CERT_B64 }}
+          p12-password: ${{ secrets.IOS_CERT_PASS }}
+
+      # preset-clean:after / export-preset:after 由 export 内部在精确时机触发；
+      # 前置钩子失败（on_error=fail）会让该 step 直接非零退出，无需外层守卫。
+      - name: 导出
+        uses: ./ci-support/.github/actions/export
+        with:
+          prefetched-dir: prefetched
+          project-path: project
+          presets: ${{ inputs.presets }}
+          target: template_release
+          editor-version: ${{ inputs.editor-version }}
+          editor-platform: ${{ inputs.editor-platform }}
+          export-type: ${{ inputs.export-type }}
+          templates-dir: templates
+          official-templates-filter: ${{ inputs.platform }}
+          encryption-key: ${{ secrets.ENCRYPTION_KEY }}
+          hooks-bundle: ${{ inputs.hooks-bundle }}
+          context: context.json
+          plan: hooks-bundle/plan.json
+          bundle-dir: hooks-bundle
+          # 契约 export.paths 三字段（相对项目根）：预设文件、project.godot、导出产物目录
+          export-presets-path: ${{ inputs.export-presets-path }}
+          project-godot: ${{ inputs.project-godot }}
+          dist-dir: ${{ inputs.dist-dir }}
+
+      - name: 扩展 package:before
+        if: inputs.hooks-bundle != ''
+        uses: ./ci-support/.github/actions/hooks
+        with:
+          anchor: package
+          phase: before
+          chain: export
+          hooks-bundle: ${{ inputs.hooks-bundle }}
+          context: context.json
+          plan: hooks-bundle/plan.json
+          bundle-dir: hooks-bundle
+          # write:artifacts 在 package:before 由执行器合并进 dist/
+
+      # write:artifacts：package:before 之后把钩子产出合并进 dist/，再打包
+      - name: 应用扩展产物
+        if: inputs.hooks-bundle != ''
+        shell: bash
+        env:
+          PROJECT_DIST: ${{ github.workspace }}/project/${{ inputs.dist-dir }}
+        run: |
+          python ci-support/.github/scripts/apply_hook_outputs.py \
+            --result hooks-result.json --kind artifacts \
+            --dist "$PROJECT_DIST"
+
+      # 空转时短路，下游 if 用 `!= 'fail'` 兜底，保证执行 step 数与未启用扩展一致。
+      - name: 归一化导出终态
+        id: post-export
+        if: inputs.hooks-bundle != ''
+        shell: bash
+        run: python ci-support/.github/scripts/normalize_hooks_result.py --fields post-export
+
+      # 每预设产物在 <dist>/<preset-safe>/ 子目录（prepare_presets 改写 export_path），
+      # 由 upload matrix job 逐预设打包上传；本 job 只中转 dist 与打包钩子散文件。
+      - name: 中转导出目录
+        if: ${{ inputs.upload-artifacts && steps.post-export.outputs.post-export != 'fail' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: raw-dist-${{ inputs.platform }}
+          path: ${{ github.workspace }}/project/${{ inputs.dist-dir }}
+          if-no-files-found: error
+          retention-days: 1
+
+      # write:artifacts 等钩子产物落在 dist 根（不属于任何预设子目录），
+      # 打包为平台级附加包；无散文件时不产生 artifact（if-no-files-found: ignore）。
+      # 该包不在预设维度内，故不走契约 export_naming（模板无 {preset} 可填），
+      # 定为 CI 布局常量名，与 Artifact 名 export-<平台>-extra 一一对应。
+      # env 名用 ZIP_NAME_EXTRA（不是 ZIP_NAME）：后者归契约渲染的预设产物，
+      # 由 check_ci_assets 的 check_export_package_naming_centralized 守着。
+      - name: 打包平台附加产物
+        if: ${{ inputs.upload-artifacts && steps.post-export.outputs.post-export != 'fail' }}
+        shell: bash
+        env:
+          PROJECT_DIST: ${{ github.workspace }}/project/${{ inputs.dist-dir }}
+          ZIP_NAME_EXTRA: ${{ inputs.repo-safe }}_${{ inputs.platform }}_extra
+        run: |
+          loose=$(find "$PROJECT_DIST" -maxdepth 1 -type f | wc -l)
+          [ "$loose" -gt 0 ] || { echo "dist 根无附加产物，跳过"; exit 0; }
+          mkdir -p dist-extra
+          (cd "$PROJECT_DIST" && zip -9 -q -r "$GITHUB_WORKSPACE/dist-extra/$ZIP_NAME_EXTRA.zip" .)
+          echo "--- 平台附加产物 ---"
+          ls -lh "$PROJECT_DIST"
+
+      - name: 上传平台附加产物
+        if: ${{ inputs.upload-artifacts && steps.post-export.outputs.post-export != 'fail' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: export-${{ inputs.platform }}-extra
+          path: dist-extra/*
+          if-no-files-found: ignore
+          retention-days: ${{ inputs.retention-export }}
+
+  # 逐预设打包上传：matrix 数据源是 resolve 归一化的 packages 数组
+  # （空数组 = 本平台无预设，job 自动跳过）。runner 取基线 roles.upload（纯文件
+  # 操作，不占平台付费配额）；每个 matrix job 只打包自己的预设子目录。
+  # zip 名（package）已由 resolve 按契约 artifacts.export_naming 渲染定死，
+  # 本 job 只消费，不再自行拼名字。
+  upload:
+    name: 打包上传 ${{ matrix.package }}
+    needs: export
+    if: ${{ inputs.presets != '' && inputs.upload-artifacts && needs.export.outputs.post-export-status != 'fail' }}
+    runs-on: ${{ inputs.upload-runs-on }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.export.outputs.packages) }}
+    steps:
+      - name: 下载导出目录
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: raw-dist-${{ inputs.platform }}
+          path: raw
+
+      - name: 打包预设产物
+        shell: bash
+        env:
+          PRESET_SAFE: ${{ matrix.preset-safe }}
+          PACKAGE: ${{ matrix.package }}
+        run: |
+          test -n "$(ls -A "raw/$PRESET_SAFE" 2>/dev/null)" \
+            || { echo "::error::raw/$PRESET_SAFE 为空，预设未产出任何产物"; exit 1; }
+          mkdir -p dist-zip
+          (cd "raw/$PRESET_SAFE" && zip -9 -q -r "$GITHUB_WORKSPACE/dist-zip/$PACKAGE.zip" .)
+          echo "--- $PACKAGE.zip ---"
+          unzip -l "dist-zip/$PACKAGE.zip"
+
+      - name: 上传预设产物
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          # Artifact 名带平台段：不同平台的同名预设（如各平台的 Release）仍各自可辨
+          name: export-${{ inputs.platform }}-${{ matrix.preset-safe }}
+          path: dist-zip/*
+          if-no-files-found: error
+          retention-days: ${{ inputs.retention-export }}

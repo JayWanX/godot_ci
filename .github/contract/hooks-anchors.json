@@ -1,0 +1,35 @@
+{
+  // 锚点注册表（扩展机制唯一权威源）：新增锚点 = 本表加一行 + 对应位置插 dispatcher
+  // 接线完整性由 check_ci_assets 双向校验：表内每个 (id, phase) 组合必须有 dispatcher 挂点，
+  // 挂点的 id/phase 必须在表内——漏接线当场红。
+  // 条目字段：id=锚点名，hook 的 on.anchor 按 id 订阅，调度按 id；
+  // chains=所属链（build / export / release，可多值）；
+  // phases=该锚点已接线的 phase 全集（全显式无缺省），hook 的 on.phase 超出即 validate 拒绝。
+  "anchors": [
+    // inject-config：dispatcher 在配置注入（config-inject）之后；
+    // 钩子产出的 scons_flags 在其后的归一化步合并进 scons_flags_base 并参与 config-hash
+    { "id": "inject-config", "chains": ["build"], "phases": ["after"] },
+    // config-hash：dispatcher 在 build-pipeline，inject-config:after 之后、归一化扩展结果之前
+    { "id": "config-hash", "chains": ["build"], "phases": ["before"] },
+    // cache-restore：dispatcher 在恢复缓存之前，其后的补丁应用紧随 dispatcher
+    { "id": "cache-restore", "chains": ["build"], "phases": ["before"] },
+    // detect-deps：dispatcher 在可选 SDK 探测安装之后、补齐标准头之前
+    { "id": "detect-deps", "chains": ["build"], "phases": ["after"] },
+    // compile：before=scons 编译前（编译选项最终定稿），after=编译产物就绪后
+    { "id": "compile", "chains": ["build"], "phases": ["before", "after"] },
+    // preset-clean：预设清洗（原地覆写 export_presets.cfg）之后
+    { "id": "preset-clean", "chains": ["export"], "phases": ["after"] },
+    // export-preset：整批预设导出完成后触发一次，仅挂 after 无 before
+    { "id": "export-preset", "chains": ["export"], "phases": ["after"] },
+    // export-preset-each：每个预设导出成功后触发一次（逐预设锚点）。dispatcher 由
+    // export 执行器在导出循环内调用（--hooks-anchor 挂点），--current-preset 把当前
+    // 预设名注入 context.export.current_preset；on.presets 过滤按当前预设判定
+    { "id": "export-preset-each", "chains": ["export"], "phases": ["after"] },
+    // package：build 链在引擎产物打包前、export 链在导出产物打包前（export-platform 上传矩阵前）；跨双链订阅须用 on.chains 限定
+    { "id": "package", "chains": ["build", "export"], "phases": ["before"] },
+    // publish：仅自有项目构建（项目仓库推 v* Tag）；外部项目构建不调用 release 链。project-release.yml 接扩展链：
+    // resolve-hooks 产 bundle，publish job dispatch。before=附件上传前（write:artifacts
+    // 由 apply_hook_outputs 合并进附件集），after=上传后（通知类）
+    { "id": "publish", "chains": ["release"], "phases": ["before", "after"] }
+  ]
+}

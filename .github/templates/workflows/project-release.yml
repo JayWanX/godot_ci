@@ -1,0 +1,26 @@
+# 模板：复制到项目仓库 .github/workflows/project-release.yml（布局同本目录，无需重命名）。
+# 复制后零必改；锁版本 / CI 仓库搬家的变更点见 .github/CI-USAGE.md。
+# 项目仓库推 v* Tag → 导出成品并发布为本项目仓库的 Release。
+name: 🚀 Project Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 要发布到的 Tag；留空取触发的 Tag，分支手动触发须填。
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: write # 创建 / 上传 Release 到本项目仓库
+
+jobs:
+  release:
+    uses: JayWanX/godot_ci/.github/workflows/project-release.yml@main
+    with:
+      tag: ${{ inputs.tag }}
+      caller-uses-ref: main # 与上面 uses:@main 同值
+    secrets: inherit

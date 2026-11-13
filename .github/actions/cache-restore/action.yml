@@ -1,0 +1,55 @@
+name: 恢复缓存
+description: 恢复 SCons 编译缓存。键按引擎维度 + 配置摘要，不含仓库名以便同配置跨项目复用。
+
+inputs:
+  cache-key:
+    description: 缓存键前缀（平台_target[_arch]，不含仓库名）。
+    default: ""
+  engine-sha:
+    description: 引擎 ref 解析出的 commit SHA。
+    default: ""
+  config-hash:
+    description: 配置文件摘要（profile/build-profile/模块/scons-flags/密钥/plan/hook 输出）。
+    default: ""
+  source-hash:
+    description: 源码层摘要（cache_impact=source 的钩子输出进入此段；空转时用常量）。
+    default: ""
+  hooks-sha:
+    description: 扩展包摘要（空=未启用，省略第 5 段）。
+    default: ""
+  source-hash-active:
+    description: 是否存在 cache_impact=source 的钩子（决定 restore-keys 是否含 source-hash 前缀）。
+    default: "false"
+  scons-cache:
+    description: SCons 缓存路径。
+    default: ${{ github.workspace }}/.scons_cache/
+
+runs:
+  using: composite
+  steps:
+    # 5 段精确键：cache-key|engine-sha|config-hash|source-hash|hooks-sha
+    # 空转（hooks-sha 为空）时省略第 5 段，键与未启用扩展时一致。
+    # restore-keys 按 cache_impact 条件化：存在 source 钩子时前缀含 source-hash，
+    # 否则保持 engine 前缀；精确键必含 source-hash，回退不得抵消精确换键。
+    # **精确键的拼法必须与 cache-save 逐字相同**（`...` + 条件式第 5 段），
+    # 否则 source-active 与 hooks-sha 的取值组合会让两侧键永不相等；restore-keys
+    # 只影响回退路径，不参与这条一致性。
+    - name: 恢复缓存（无 source 钩子）
+      if: inputs.source-hash-active != 'true'
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ inputs.scons-cache }}
+        key: ${{ inputs.cache-key }}|${{ inputs.engine-sha }}|${{ inputs.config-hash }}|${{ inputs.source-hash }}${{ inputs.hooks-sha != '' && format('|{0}', inputs.hooks-sha) || '' }}
+        restore-keys: ${{ inputs.cache-key }}|${{ inputs.engine-sha }}|
+
+    - name: 恢复缓存（含 source 钩子）
+      if: inputs.source-hash-active == 'true'
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ inputs.scons-cache }}
+        key: ${{ inputs.cache-key }}|${{ inputs.engine-sha }}|${{ inputs.config-hash }}|${{ inputs.source-hash }}${{ inputs.hooks-sha != '' && format('|{0}', inputs.hooks-sha) || '' }}
+        restore-keys: ${{ inputs.cache-key }}|${{ inputs.engine-sha }}|${{ inputs.config-hash }}|${{ inputs.source-hash }}|
+
+    - name: 记录 Unix 时间戳
+      shell: bash
+      run: echo "CACHE_TIMESTAMP=$(date +%s)" >> "$GITHUB_ENV"

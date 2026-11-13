@@ -1,0 +1,258 @@
+name: 导出项目
+description: 使用 Godot 编辑器与导出模板导出 Godot 项目。
+
+inputs:
+  project-path:
+    description: Godot 项目路径（根目录需含 project.godot 与 export_presets.cfg）。
+    required: true
+  presets:
+    description: >-
+      要导出的预设名，逗号分隔（resolve 归一化必传：契约 export.presets / presets-<平台>）。
+      空值不自动检测，直调传空即 fail-fast。
+    required: true
+  target:
+    description: 导出所用的构建目标（决定 --export-release / --export-debug）。
+    required: true
+    type: choice
+    options: [template_release, template_debug]
+  editor-version:
+    description: 官方编辑器与官方模板的版本标签（由契约 export.editor_version 提供）。
+    required: false
+    default: ""
+  editor-platform:
+    description: 官方编辑器下载平台（须与运行器系统匹配）。
+    required: false
+    default: linux.x86_64
+  export-type:
+    description: '导出类型：official（下载官方 tpz）或 custom_build（用 templates-dir 下的自编译产物）。'
+    required: false
+    default: official
+    type: choice
+    options: [official, custom_build]
+  templates-dir:
+    description: 包含导出模板的目录（custom_build 时由 prepare_presets 引用）。
+    required: true
+  official-templates-filter:
+    description: >-
+      仅下载这些平台的官方模板，逗号分隔（如 windows,linux,macos）。空=全部。
+      只影响 official 模式的模板筛选。
+    required: false
+    default: ""
+  encryption-key:
+    description: >-
+      PCK 加密密钥，仅 custom_build 模式生效：非空则强制 encrypt_pck=true 并经
+      GODOT_SCRIPT_ENCRYPTION_KEY 传给编辑器，空则不加密。official 模式官方模板
+      无编译期密钥，一律不加密。
+    required: false
+    default: ""
+  prefetched-dir:
+    description: >-
+      已预取的编辑器与模板目录（由 prefetch-editor-templates 产出）。非空时跳过在线下载，
+      直接解压该目录下的编辑器 zip 与 export_templates.tpz。
+    required: false
+    default: ""
+  hooks-bundle:
+    description: 扩展包 artifact 名（空=未启用，导出链 dispatcher 全部短路）。
+    required: false
+    default: ""
+  context:
+    description: context.json 路径（只读上下文，钩子消费）。
+    required: false
+    default: context.json
+  plan:
+    description: plan.json 路径（包内）。
+    required: false
+    default: hooks-bundle/plan.json
+  bundle-dir:
+    description: 已就位的扩展包解压目录。
+    required: false
+    default: hooks-bundle
+  export-presets-path:
+    description: >-
+      导出预设文件相对项目根的路径（契约 export.paths.export_presets，resolve 归一化后必传）。
+    required: true
+  project-godot:
+    description: >-
+      Godot 项目配置文件相对项目根的路径（契约 export.paths.project_godot，resolve 归一化后必传）。
+    required: true
+  dist-dir:
+    description: >-
+      导出产物目录相对项目根的路径（契约 export.paths.dist）。预设的 export_path
+      与实际输出目录都以此为准（resolve 归一化后必传）。
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: 校验输入参数
+      shell: bash
+      env:
+        INPUT_PROJECT_PATH: ${{ inputs.project-path }}
+        INPUT_EXPORT_TYPE: ${{ inputs.export-type }}
+        INPUT_EDITOR_VERSION: ${{ inputs.editor-version }}
+        INPUT_TEMPLATES_DIR: ${{ inputs.templates-dir }}
+        # 敏感值走 env，不经 argv
+        SCRIPT_AES256_ENCRYPTION_KEY: ${{ inputs.encryption-key }}
+        INPUT_EXPORT_PRESETS_PATH: ${{ inputs.export-presets-path }}
+        INPUT_PROJECT_GODOT: ${{ inputs.project-godot }}
+        INPUT_DIST_DIR: ${{ inputs.dist-dir }}
+      run: |
+        python "$GITHUB_ACTION_PATH/scripts/export_steps.py" validate-inputs \
+        --project-path "$INPUT_PROJECT_PATH" --export-type "$INPUT_EXPORT_TYPE" \
+        --editor-version "$INPUT_EDITOR_VERSION" --templates-dir "$INPUT_TEMPLATES_DIR" \
+        --export-presets-path "$INPUT_EXPORT_PRESETS_PATH" --project-godot "$INPUT_PROJECT_GODOT" \
+        --dist-dir "$INPUT_DIST_DIR"
+
+    - name: 安装编辑器运行时库
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libgl1 libegl1 libxkbcommon0 libxkbcommon-x11-0 libxcb-cursor0 \
+          libwayland-client0 libwayland-cursor0 libwayland-egl1 libxcursor1 libxinerama1 \
+          libxi6 libxrandr2 libasound2 libpulse0 unzip
+
+    - name: 准备编辑器
+      shell: bash
+      env:
+        INPUT_EDITOR_VERSION: ${{ inputs.editor-version }}
+        INPUT_EDITOR_PLATFORM: ${{ inputs.editor-platform }}
+        INPUT_PREFETCHED_DIR: ${{ inputs.prefetched-dir }}
+        RUNNER_OS: ${{ runner.os }}
+      run: |
+        python "$GITHUB_ACTION_PATH/scripts/export_steps.py" prepare-editor \
+        --editor-version "$INPUT_EDITOR_VERSION" --editor-platform "$INPUT_EDITOR_PLATFORM" \
+        --prefetched "$INPUT_PREFETCHED_DIR"
+
+    - name: 准备模板
+      if: inputs.export-type == 'official'
+      shell: bash
+      env:
+        INPUT_EDITOR_VERSION: ${{ inputs.editor-version }}
+        INPUT_OFFICIAL_TEMPLATES_FILTER: ${{ inputs.official-templates-filter }}
+        INPUT_PREFETCHED_DIR: ${{ inputs.prefetched-dir }}
+      run: |
+        python "$GITHUB_ACTION_PATH/scripts/export_steps.py" prepare-templates \
+        --editor-version "$INPUT_EDITOR_VERSION" \
+        --official-templates-filter "$INPUT_OFFICIAL_TEMPLATES_FILTER" \
+        --prefetched "$INPUT_PREFETCHED_DIR"
+
+    - name: 解析预设
+      shell: bash
+      env:
+        SOURCE_PRESETS: ${{ env.SOURCE_PRESETS }}
+        DIST_REL: ${{ env.DIST_REL }}
+        PRESET_LIST: ${{ env.PRESET_LIST }}
+        PROJECT_GODOT_REL: ${{ env.PROJECT_GODOT_REL }}
+        EDITOR: ${{ env.EDITOR }}
+        INPUT_PRESETS: ${{ inputs.presets }}
+      run: |
+        python "$GITHUB_ACTION_PATH/scripts/export_steps.py" resolve-presets \
+        --presets "$INPUT_PRESETS"
+
+    - name: 清洗导出配置
+      shell: bash
+      env:
+        SOURCE_PRESETS: ${{ env.SOURCE_PRESETS }}
+        DIST_REL: ${{ env.DIST_REL }}
+        PRESET_LIST: ${{ env.PRESET_LIST }}
+        PROJECT_GODOT_REL: ${{ env.PROJECT_GODOT_REL }}
+        EDITOR: ${{ env.EDITOR }}
+        INPUT_PROJECT_PATH: ${{ inputs.project-path }}
+        # 敏感值走 env，不经 argv
+        SCRIPT_AES256_ENCRYPTION_KEY: ${{ inputs.encryption-key }}
+        INPUT_EXPORT_TYPE: ${{ inputs.export-type }}
+        INPUT_TEMPLATES_DIR: ${{ inputs.templates-dir }}
+        INPUT_OFFICIAL_TEMPLATES_FILTER: ${{ inputs.official-templates-filter }}
+      run: |
+        mkdir -p "$INPUT_PROJECT_PATH/$DIST_REL"
+        python "$GITHUB_ACTION_PATH/scripts/prepare_presets.py" \
+          --cfg "$SOURCE_PRESETS" \
+          --export-type "$INPUT_EXPORT_TYPE" \
+          --templates-dir "$INPUT_TEMPLATES_DIR" \
+          --project-root "$INPUT_PROJECT_PATH" \
+          --presets "$PRESET_LIST" \
+          --platforms "$INPUT_OFFICIAL_TEMPLATES_FILTER" \
+          --dist "$DIST_REL" \
+          --project-godot "$PROJECT_GODOT_REL"
+        echo "--- 预设清洗结果（$SOURCE_PRESETS）---"
+        grep -E 'name=|encrypt_|export_path=|custom_template/' "$SOURCE_PRESETS" || true
+
+    # preset-clean:after：预设清洗（原地覆写预设文件）之后触发，钩子改动不会被清洗冲掉。
+    - name: 扩展 preset-clean:after
+      if: inputs.hooks-bundle != ''
+      uses: ./ci-support/.github/actions/hooks
+      with:
+        anchor: preset-clean
+        phase: after
+        chain: export
+        hooks-bundle: ${{ inputs.hooks-bundle }}
+        context: ${{ inputs.context }}
+        plan: ${{ inputs.plan }}
+        bundle-dir: ${{ inputs.bundle-dir }}
+
+    # write:presets：把钩子的声明式覆盖应用到清洗后的预设文件（不让钩子原地覆写 cfg）。
+    - name: 应用预设覆盖
+      if: inputs.hooks-bundle != ''
+      shell: bash
+      env:
+        SOURCE_PRESETS: ${{ env.SOURCE_PRESETS }}
+      run: |
+        python "$GITHUB_WORKSPACE/ci-support/.github/scripts/apply_hook_outputs.py" \
+        --result hooks-result.json --kind presets --cfg "$SOURCE_PRESETS"
+
+    - name: 导入项目资源
+      shell: bash
+      env:
+        SOURCE_PRESETS: ${{ env.SOURCE_PRESETS }}
+        DIST_REL: ${{ env.DIST_REL }}
+        PRESET_LIST: ${{ env.PRESET_LIST }}
+        PROJECT_GODOT_REL: ${{ env.PROJECT_GODOT_REL }}
+        EDITOR: ${{ env.EDITOR }}
+        INPUT_PROJECT_PATH: ${{ inputs.project-path }}
+      run: |
+        # 导出前先导入资源，否则导出因缺字体/资源导入失败（失败即 fail-fast，不吞错）
+        python "$GITHUB_ACTION_PATH/scripts/export_steps.py" import-assets \
+          --project-path "$INPUT_PROJECT_PATH"
+        echo "--- .godot/imported ---"
+        ls -la "$INPUT_PROJECT_PATH/.godot/imported" 2>/dev/null | head -20 || true
+
+    - name: 逐个导出预设
+      shell: bash
+      env:
+        SOURCE_PRESETS: ${{ env.SOURCE_PRESETS }}
+        DIST_REL: ${{ env.DIST_REL }}
+        PRESET_LIST: ${{ env.PRESET_LIST }}
+        PROJECT_GODOT_REL: ${{ env.PROJECT_GODOT_REL }}
+        EDITOR: ${{ env.EDITOR }}
+        INPUT_PROJECT_PATH: ${{ inputs.project-path }}
+        INPUT_TARGET: ${{ inputs.target }}
+        # 敏感值走 env，不经 argv
+        SCRIPT_AES256_ENCRYPTION_KEY: ${{ inputs.encryption-key }}
+        INPUT_EXPORT_TYPE: ${{ inputs.export-type }}
+        # 逐预设锚点 export-preset-each 的 dispatcher 参数（bundle 空时执行器内短路）
+        INPUT_HOOKS_BUNDLE: ${{ inputs.hooks-bundle }}
+        INPUT_BUNDLE_DIR: ${{ inputs.bundle-dir }}
+        INPUT_CONTEXT: ${{ inputs.context }}
+        HOOKS_EXEC: ${{ github.workspace }}/ci-support/.github/scripts/run_hooks.py
+      run: |
+        python "$GITHUB_ACTION_PATH/scripts/export_steps.py" export-presets \
+        --project-path "$INPUT_PROJECT_PATH" --target "$INPUT_TARGET" \
+        --export-type "$INPUT_EXPORT_TYPE" \
+        --preset-list "$PRESET_LIST" --dist-dir "$DIST_REL" \
+        --hooks-bundle "$INPUT_HOOKS_BUNDLE" --hooks-bundle-dir "$INPUT_BUNDLE_DIR" \
+        --hooks-context "$INPUT_CONTEXT" --hooks-exec "$HOOKS_EXEC"
+
+    # export-preset:after：本 action 批量导出全部预设，整批完成后触发一次；
+    # 需要逐预设语义的钩子读 context.export.presets。
+    - name: 扩展 export-preset:after
+      if: inputs.hooks-bundle != ''
+      uses: ./ci-support/.github/actions/hooks
+      with:
+        anchor: export-preset
+        phase: after
+        chain: export
+        hooks-bundle: ${{ inputs.hooks-bundle }}
+        context: ${{ inputs.context }}
+        plan: ${{ inputs.plan }}
+        bundle-dir: ${{ inputs.bundle-dir }}

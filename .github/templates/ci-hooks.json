@@ -1,0 +1,211 @@
+{
+  // 扩展清单模板：复制到项目仓库的 .github/ci-hooks.json（路径由契约 hooks.manifest 声明）。
+  // 清单不存在 = 不启用扩展。用法：删掉用不到的样例块，把 run 指向项目仓库里真实存在的脚本；
+  // 数组书写顺序即执行顺序（串行）。字段的机器可读定义由顶部 $schema 指向，编辑器据此补全；
+  // 锚点与可用的 phase 以 CI 仓库的注册表为唯一权威源，写成未接线的组合会被校验拒绝。
+  // 下方样例覆盖已接线锚点组合；启停方式见同目录 CI-USAGE.md「扩展清单」。
+  "$schema": "https://raw.githubusercontent.com/JayWanX/godot_ci/main/.github/contract/hooks.schema.json",
+
+  "hooks": [
+    // ---- build 链 ----
+    {
+      // 注入 SCons 编译标志。必须挂 inject-config:after——再晚 SDK 依赖已判完
+      // （如 d3d12=yes 不会触发安装，编译会失败）。
+      "id": "gen-flags",
+      "on": {
+        "anchor": "inject-config",
+        "phase": "after",
+        "target": ["template_release"]
+      }, // 声明式过滤，省略 = 全部
+      "run": "ci-hooks/gen_flags.py", // 相对项目根；解释器白名单 .py / .sh
+      "with": { "inputs": ["ci-hooks/lib/flags_base.py"] }, // 依赖闭包；resolve 期递归扫描 import 并校验
+      "capabilities": ["write:scons_flags"],
+      "outputs": ["scons_flags"], // 须是 capabilities 能产出的子集
+      "cache_impact": "config", // 改编译选项 → 进 config-hash
+      "on_error": "fail", // fail（默认）| warn（回滚后继续）
+      "timeout_minutes": 5 // 1–15 分钟；超时杀进程组
+    },
+    {
+      // 引擎源码补丁：在 cache-restore:before 应用到引擎源码根（git-apply 兼容格式）。
+      "id": "engine-patch",
+      "on": { "anchor": "cache-restore", "phase": "before" },
+      "run": "ci-hooks/engine_patch.py",
+      "with": { "inputs": ["ci-hooks/engine_patch.config.json"] },
+      "capabilities": ["write:source_patch"],
+      "outputs": ["source_patch"],
+      "cache_impact": "source"
+    },
+    {
+      // 构建配置补丁：在 cache-restore:before 产出 profile_patch，由 CI 以声明式补丁
+      // 应用到注入的 profile.py（不改原文件）。
+      "id": "profile-patch",
+      "on": { "anchor": "cache-restore", "phase": "before" },
+      "run": "ci-hooks/profile_patch.py",
+      "with": { "inputs": [] },
+      "capabilities": ["write:profile_patch"],
+      "outputs": ["profile_patch"],
+      "cache_impact": "source"
+    },
+    {
+      // 依赖探测后加工：detect-deps:after 在可选 SDK 安装之后、补齐标准头之前。
+      // 典型用途：按探测结果生成构建期数据文件（write_paths 直接写项目树的演示）。
+      "id": "post-deps-gen",
+      "on": { "anchor": "detect-deps", "phase": "after", "platform": ["windows"] },
+      "run": "ci-hooks/post_deps_gen.py",
+      "with": { "inputs": [] },
+      "capabilities": ["write:project_tree"],
+      "write_paths": ["build/generated/**"],
+      "outputs": [],
+      "cache_impact": "config"
+    },
+    {
+      // 配置摘要定稿前：config-hash:before，适合注入影响缓存但非编译标志的输入
+      // （如按环境生成的清单文件）。
+      "id": "pre-hash-gen",
+      "on": { "anchor": "config-hash", "phase": "before" },
+      "run": "ci-hooks/pre_hash_gen.py",
+      "with": { "inputs": [] },
+      "capabilities": ["write:project_tree"],
+      "write_paths": ["build/manifest.json"],
+      "outputs": [],
+      "cache_impact": "config"
+    },
+    {
+      // 编译前：compile:before 是编译选项最终定稿点（此后再改不再影响本次编译）。
+      "id": "pre-compile-check",
+      "on": { "anchor": "compile", "phase": "before" },
+      "run": "ci-hooks/pre_compile_check.py",
+      "with": { "inputs": [] },
+      "capabilities": ["read:context"],
+      "outputs": [],
+      "cache_impact": "none"
+    },
+    {
+      // 编译后：compile:after 产物已就绪，可做冒烟校验 / 记录元数据。
+      // secret:<NAME> 能力演示：值仅注入本钩子进程，名字受 CI 侧白名单约束。
+      "id": "post-compile-report",
+      "on": { "anchor": "compile", "phase": "after" },
+      "run": "ci-hooks/post_compile_report.py",
+      "with": { "inputs": [] },
+      "capabilities": ["read:context", "secret:GIT_PAT"],
+      "outputs": [],
+      "cache_impact": "none",
+      "on_error": "warn"
+    },
+
+    // ---- export 链 ----
+    {
+      // 签名：package:before 产出的文件会合并进导出产物目录再打包。
+      // package 锚点跨 build / export 两链，用 on.chains 限定只订阅 export 链。
+      "id": "sign-windows",
+      "on": {
+        "anchor": "package",
+        "phase": "before",
+        "chains": ["export"],
+        "platform": ["windows"]
+      },
+      "run": "ci-hooks/sign.py",
+      "with": { "inputs": ["ci-hooks/sign.config.json"] },
+      "capabilities": ["write:artifacts"],
+      "outputs": ["artifacts"],
+      "cache_impact": "none",
+      "on_error": "warn"
+    },
+
+    {
+      // 预设字段覆盖：preset-clean:after 声明式覆盖预设字段（格式 {预设名: {字段: 值}}，
+      // 字段含 '/' 落 options 段）——不要让脚本原地覆写 export_presets.cfg；
+      // 预设名写错会报错，不静默丢覆盖。
+      "id": "override-presets",
+      "on": { "anchor": "preset-clean", "phase": "after" },
+      "run": "ci-hooks/override_presets.py",
+      "with": { "inputs": [] },
+      "capabilities": ["write:presets"],
+      "outputs": ["presets"],
+      "cache_impact": "none"
+    },
+    {
+      // 项目树写入（write_paths）：直接写项目根内声明的路径，与产物 / 指令通道并列。
+      // 典型用途：导出前装配生成型目录（如内嵌运行时、本地化资源）。
+      // 路径语义：dir/** = 整棵子树，path = 单文件或目录；未声明路径的写入会被拒绝。
+      "id": "prepare-runtime",
+      "on": {
+        "anchor": "preset-clean",
+        "phase": "after",
+        "chains": ["export"]
+      },
+      "run": "ci-hooks/prepare_runtime.py", // 该脚本可用网络（执行器不代为禁网）
+      "with": { "inputs": [] },
+      "capabilities": ["write:project_tree"], // 须与 write_paths 成对，缺一 validate 拒绝
+      "write_paths": ["runtime/**"], // 项目根相对路径；脚本须用 GODOT_HOOK_PROJECT_ROOT 取项目根
+      "outputs": [],
+      "cache_impact": "none",
+      "timeout_minutes": 10
+    },
+    {
+      // 逐预设钩子：每个预设导出成功后触发一次（整批完成用 export-preset 锚点）。
+      // 当前预设名在 GODOT_CONTEXT_EXPORT_CURRENT_PRESET；
+      // on.presets 省略 = 每个预设都触发，声明 = 只对名单内预设触发。
+      "id": "per-preset-check",
+      "on": {
+        "anchor": "export-preset-each",
+        "phase": "after",
+        "presets": ["Windows Desktop"]
+      },
+      "run": "ci-hooks/per_preset_check.py",
+      "with": { "inputs": [] },
+      "capabilities": ["read:context"],
+      "outputs": [],
+      "cache_impact": "none"
+    },
+
+    {
+      // 整批导出后：export-preset:after 在全部预设导出完成后触发一次
+      // （逐预设语义用上面的 export-preset-each）。可读 context.export.presets 拿本次名单。
+      "id": "post-export-audit",
+      "on": { "anchor": "export-preset", "phase": "after" },
+      "run": "ci-hooks/post_export_audit.py",
+      "with": { "inputs": [] },
+      "capabilities": ["read:context"],
+      "outputs": [],
+      "cache_impact": "none"
+    },
+    {
+      // build 链的 package:before：引擎产物打包前（若只在导出链用，见上方 sign-windows）。
+      "id": "sign-engine-artifact",
+      "on": {
+        "anchor": "package",
+        "phase": "before",
+        "chains": ["build"]
+      },
+      "run": "ci-hooks/sign_engine.py",
+      "with": { "inputs": [] },
+      "capabilities": ["write:artifacts"],
+      "outputs": ["artifacts"],
+      "cache_impact": "none"
+    },
+
+    // ---- release 链（项目仓库推 v* Tag 触发）----
+    {
+      // 发布前加工：publish:before 产出的文件合并进 Release 附件集（与导出产物同名会覆盖）。
+      "id": "checksums",
+      "on": { "anchor": "publish", "phase": "before" },
+      "run": "ci-hooks/checksums.py",
+      "with": { "inputs": [] },
+      "capabilities": ["write:artifacts"],
+      "outputs": ["artifacts"],
+      "cache_impact": "none"
+    },
+    {
+      // 发布后通知：publish:after 在附件上传完成后执行。
+      // 纯只读钩子无文件产出，outputs 留空；capabilities 须至少声明一项。
+      "id": "announce",
+      "on": { "anchor": "publish", "phase": "after" },
+      "run": "ci-hooks/announce.py",
+      "with": { "inputs": [] },
+      "capabilities": ["read:context"],
+      "outputs": [],
+      "cache_impact": "none"
+    }
+  ]
+}

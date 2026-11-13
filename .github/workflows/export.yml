@@ -1,0 +1,401 @@
+name: 📦 Project Export
+
+on:
+  workflow_dispatch:
+    inputs:
+      project:
+        description: >-
+          待导出项目来源声明 remote:<owner/repo>[@<ref>]。留空则导出当前仓库（此时当前仓库
+          必须有 .github/ci-contract.json）。项目无契约时用默认契约（引擎取
+          godotengine/godot 最新 stable、编辑器同版本，预设读项目 export_presets.cfg 全部）。
+        required: false
+        default: ""
+        type: string
+      export-type:
+        description: >-
+          official=用 Godot 官方导出模板（不编译任何东西）；custom_build=先编译导出模板
+          （可用 scons-flags / profile 裁剪，模板与引擎版本必然一致）。
+          编辑器恒用官方版。默认 custom_build。
+        required: false
+        default: custom_build
+        type: choice
+        options: [custom_build, official]
+      presets:
+        description: >-
+          要导出的预设名（被导出项目 export_presets.cfg 中的 name，逗号分隔）。
+          留空则读契约 export.presets。
+        required: false
+        default: ""
+        type: string
+      editor-version:
+        description: >-
+          官方编辑器版本（如 <version>-stable），两种模式都用它下载编辑器。留空则读契约 export.editor_version。
+          custom_build 下须与契约 engine.source 的 major.minor 一致（resolve 期校验，不一致直接失败）。
+        required: false
+        default: ""
+        type: string
+      scons-flags:
+        description: >-
+          编译导出模板时的附加 SCons 标志（覆写契约 build.scons_flags）；仅 custom_build 生效。
+        required: false
+        default: ""
+        type: string
+      profile:
+        description: >-
+          编译导出模板时的 SCons profile 来源覆写（覆写契约 build.paths.profile）；仅 custom_build 生效。
+          空=用契约值；remote:<owner/repo>[@<ref>][:<path>] 或 local:<path>。
+        required: false
+        default: ""
+        type: string
+      build-profile:
+        description: >-
+          编译导出模板时的 build profile（.gdbuild）来源覆写（覆写契约 build.paths.build_profile）；
+          仅 custom_build 生效。空=用契约值；remote:<owner/repo>[@<ref>][:<path>] 或 local:<path>。
+        required: false
+        default: ""
+        type: string
+
+  workflow_call:
+    inputs:
+      project:
+        description: >-
+          待导出项目来源声明 remote:<owner/repo>[@<ref>]。留空则导出当前仓库（github.sha）。
+        required: false
+        default: ""
+        type: string
+      export-type:
+        description: >-
+          official=官方模板（不编译任何东西）；custom_build=先用 build 工作流编译导出模板。
+          留空读契约 export.type。编辑器恒用官方版。
+        required: false
+        default: ""
+        type: string
+      presets:
+        description: >-
+          要导出的预设名（被导出项目 export_presets.cfg 中的 name，逗号分隔）。
+          留空则读契约 export.presets。
+        required: false
+        default: ""
+        type: string
+      editor-version:
+        description: >-
+          官方编辑器版本（如 <version>-stable），两种模式都用它下载编辑器。留空则读契约 export.editor_version。
+        required: false
+        default: ""
+        type: string
+      scons-flags:
+        description: 编译导出模板时的附加 SCons 标志（覆写契约 build.scons_flags）；仅 custom_build 生效。
+        required: false
+        default: ""
+        type: string
+      profile:
+        description: 编译导出模板时的 SCons profile 来源覆写（覆写契约 build.paths.profile）；仅 custom_build 生效。
+        required: false
+        default: ""
+        type: string
+      build-profile:
+        description: 编译导出模板时的 build profile 来源覆写（覆写契约 build.paths.build_profile）；仅 custom_build 生效。
+        required: false
+        default: ""
+        type: string
+      caller-uses-ref:
+        description: '调用方 uses: …@<ref> 里的 ref；resolve 期断言与契约 ci.ref / $schema URL 的 ref 段三者一致。'
+        required: false
+        default: ""
+        type: string
+    secrets:
+      GIT_PAT:
+        description: "私有引擎仓库访问令牌。"
+        required: false
+      ENCRYPTION_KEY:
+        description: "Godot PCK 加密密钥（十六进制）。空=不加密。"
+        required: false
+      IOS_CERT_B64:
+        description: "Apple 签名证书（base64 编码的 p12）。"
+        required: false
+      IOS_CERT_PASS:
+        description: "Apple 签名证书密码。"
+        required: false
+    outputs:
+      repo-safe:
+        description: 项目仓库名安全形式（产物名前缀；Release 附件家族判定用）。
+        value: ${{ jobs.resolve.outputs.repo-safe }}
+      artifact-prefix:
+        description: 实际使用的产物名前缀（契约 artifacts.prefix，空则取 repo-safe）。
+        value: ${{ jobs.resolve.outputs.artifact-prefix }}
+      export-complete:
+        description: >-
+          本轮选中的预设是否覆盖项目 export_presets.cfg 的全部预设。
+          true 才允许清理 Release 陈旧附件（否则其余附件是上一轮有效产物）。
+        value: ${{ jobs.resolve.outputs.export-complete }}
+
+permissions:
+  contents: read
+
+concurrency:
+  # 按 ref + 导出类型区分：不同预设/模式可并行，同一条重复触发才取消。
+  # 类型维度对未传该输入的调用方无值，占位字面量属组键语义的一部分。
+  group: export-${{ github.ref }}-${{ inputs.export-type || 'default' }}  # noqa: fallback
+  cancel-in-progress: false
+
+jobs:
+  # Chain Runner Bootstrap（workflows/runner.yml）：resolve 作业的分配先于契约可读，
+  # runner 取基线 roles.resolve（不可覆写）；下游作业读 platforms-json 的平台字段。
+  runner:
+    name: 引导链式运行器
+    uses: $/.github/workflows/runner.yml
+    secrets:
+      GIT_PAT: ${{ secrets.GIT_PAT }}
+
+  resolve:
+    name: 解析导出参数
+    needs: runner
+    runs-on: ${{ fromJSON(needs.runner.outputs.runner-json).resolve }}
+    timeout-minutes: 30
+    outputs:
+      presets: ${{ steps.resolve.outputs.presets }}
+      export-type: ${{ steps.resolve.outputs.export-type }}
+      upload-artifacts: ${{ steps.resolve.outputs.upload-artifacts }}
+      template-platforms: ${{ steps.resolve.outputs.template-platforms }}
+      engine-source: ${{ steps.resolve.outputs.engine-source }}
+      engine-ref: ${{ steps.resolve.outputs.engine-ref }}
+      runner-json: ${{ steps.resolve.outputs.runner-json }}
+      platforms-json: ${{ steps.resolve.outputs.platforms-json }}
+      editor-archives-matrix: ${{ steps.resolve.outputs.editor-archives-matrix }}
+      editor-version: ${{ steps.resolve.outputs.editor-version }}
+      repo-safe: ${{ steps.resolve.outputs.repo-safe }}
+      presets-windows: ${{ steps.resolve.outputs.presets-windows }}
+      presets-linux: ${{ steps.resolve.outputs.presets-linux }}
+      presets-macos: ${{ steps.resolve.outputs.presets-macos }}
+      presets-web: ${{ steps.resolve.outputs.presets-web }}
+      presets-android: ${{ steps.resolve.outputs.presets-android }}
+      presets-ios: ${{ steps.resolve.outputs.presets-ios }}
+      presets-visionos: ${{ steps.resolve.outputs.presets-visionos }}
+      packages-windows: ${{ steps.resolve.outputs.packages-windows }}
+      packages-linux: ${{ steps.resolve.outputs.packages-linux }}
+      packages-macos: ${{ steps.resolve.outputs.packages-macos }}
+      packages-web: ${{ steps.resolve.outputs.packages-web }}
+      packages-android: ${{ steps.resolve.outputs.packages-android }}
+      packages-ios: ${{ steps.resolve.outputs.packages-ios }}
+      packages-visionos: ${{ steps.resolve.outputs.packages-visionos }}
+      project-repo: ${{ steps.resolve.outputs.project-repo }}
+      project-ref: ${{ steps.resolve.outputs.project-ref }}
+      external-project: ${{ steps.resolve.outputs.external-project }}
+      retention-export: ${{ steps.resolve.outputs.retention-export }}
+      retention-prefetch: ${{ steps.resolve.outputs.retention-prefetch }}
+      hooks-bundle: ${{ steps.resolve.outputs.hooks-bundle }}
+      hooks-sha: ${{ steps.resolve.outputs.hooks-sha }}
+      scons-flags: ${{ steps.resolve.outputs.scons-flags }}
+      profile: ${{ steps.resolve.outputs.profile }}
+      build-profile: ${{ steps.resolve.outputs.build-profile }}
+      ci-repository: ${{ steps.resolve.outputs.ci-repository }}
+      ci-ref: ${{ steps.resolve.outputs.ci-ref }}
+      artifact-prefix: ${{ steps.resolve.outputs.artifact-prefix }}
+      artifact-build-naming: ${{ steps.resolve.outputs.artifact-build-naming }}
+      project-godot: ${{ steps.resolve.outputs.project-godot }}
+      export-presets-path: ${{ steps.resolve.outputs.export-presets-path }}
+      dist-dir: ${{ steps.resolve.outputs.dist-dir }}
+      # Release 陈旧附件清理的完整性门控：只有覆盖项目全部预设才允许清理
+      export-complete: ${{ steps.resolve.outputs.export-complete }}
+      templates-pattern-windows: ${{ steps.resolve.outputs.templates-pattern-windows }}
+      templates-pattern-linux: ${{ steps.resolve.outputs.templates-pattern-linux }}
+      templates-pattern-macos: ${{ steps.resolve.outputs.templates-pattern-macos }}
+      templates-pattern-web: ${{ steps.resolve.outputs.templates-pattern-web }}
+      templates-pattern-android: ${{ steps.resolve.outputs.templates-pattern-android }}
+      templates-pattern-ios: ${{ steps.resolve.outputs.templates-pattern-ios }}
+      templates-pattern-visionos: ${{ steps.resolve.outputs.templates-pattern-visionos }}
+    steps:
+      # 项目仓库检出：契约（ci-contract.json）的来源。跨仓场景下 caller 仓库只有契约 + 薄触发器。
+      - name: 检出仓库
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+
+      # CI 资产检出：job.workflow_* 即正在运行的这份工作流所属仓库（跨仓 called workflow 下为 CI 资产仓库）。
+      - name: 检出 CI 资产
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ job.workflow_repository || github.repository }}
+          ref: ${{ job.workflow_sha || github.sha }}
+          token: ${{ secrets.GIT_PAT || github.token }}
+          path: ci-support
+          fetch-depth: 1
+          filter: blob:none
+          sparse-checkout: .github
+
+      - name: 解析导出参数
+        id: resolve
+        uses: ./ci-support/.github/actions/resolve-export
+        # 契约取项目仓库那份（root 检出），不是 CI 资产仓库自带的那份模板契约。
+        env:
+          CI_CONTRACT: ${{ github.workspace }}/.github/ci-contract.json
+          # 本次运行的 CI 资产身份：单仓自用与跨仓形态都由它自描述，无需契约填自己。
+          WORKFLOW_REPOSITORY: ${{ job.workflow_repository || github.repository }}
+          WORKFLOW_SHA: ${{ job.workflow_sha || github.sha }}
+        with:
+          project: ${{ inputs.project }}
+          presets: ${{ inputs.presets }}
+          export-type: ${{ inputs.export-type }}
+          editor-version: ${{ inputs.editor-version }}
+          scons-flags: ${{ inputs.scons-flags }}
+          profile: ${{ inputs.profile }}
+          build-profile: ${{ inputs.build-profile }}
+          caller-uses-ref: ${{ inputs.caller-uses-ref }}
+          repo-token: ${{ secrets.GIT_PAT }}
+
+      # official 模式的 tpz 在此下载一次（单文件、名称无平台维度，不随基线映射漂移）；
+      # 编辑器下载已拆到 prefetch job 按 matrix 分档进行
+      - name: 下载官方导出模板
+        if: steps.resolve.outputs.export-type == 'official'
+        shell: bash
+        env:
+          INPUT_EDITOR_VERSION: ${{ steps.resolve.outputs.editor-version }}
+        run: |
+          curl -fsSL --retry 3 -o export_templates.tpz \
+            "https://github.com/godotengine/godot/releases/download/$INPUT_EDITOR_VERSION/Godot_v${INPUT_EDITOR_VERSION}_export_templates.tpz"
+          ls -lh export_templates.tpz
+
+      - name: 上传官方导出模板
+        if: steps.resolve.outputs.export-type == 'official'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.resolve.outputs.repo-safe }}_export-templates
+          path: export_templates.tpz
+          if-no-files-found: error
+          retention-days: ${{ steps.resolve.outputs.retention-prefetch }}
+
+  # 编辑器按档案分档下载（档案来自基线 platforms.<平台>.editor_archive，经 resolve
+  # 按档案去重转 matrix-include 形态）：同一档案被多平台共用时只下载一份；要换档案
+  # 只改基线或契约的 platforms.editor_archive，不动本文件。
+  prefetch:
+    name: 预取编辑器 ${{ matrix.key }}
+    needs: resolve
+    runs-on: ${{ fromJSON(needs.resolve.outputs.runner-json).resolve }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.resolve.outputs.editor-archives-matrix) }}
+    steps:
+      - name: 检出 CI 资产
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ job.workflow_repository || github.repository }}
+          ref: ${{ job.workflow_sha || github.sha }}
+          token: ${{ secrets.GIT_PAT || github.token }}
+          path: ci-support
+          fetch-depth: 1
+          filter: blob:none
+          sparse-checkout: .github/actions/prefetch-editor-templates
+
+      - name: 下载并上传编辑器
+        uses: ./ci-support/.github/actions/prefetch-editor-templates
+        with:
+          editor-version: ${{ needs.resolve.outputs.editor-version }}
+          editor-platform: ${{ matrix.platform }}
+          editor-key: ${{ matrix.key }}
+          repo-safe: ${{ needs.resolve.outputs.repo-safe }}
+          retention-days: ${{ needs.resolve.outputs.retention-prefetch }}
+
+  build-templates:
+    name: 编译导出模板
+    needs: resolve
+    if: needs.resolve.outputs.export-type == 'custom_build'
+    uses: $/.github/workflows/build.yml
+    with:
+      # 自有项目构建不传 project（传了会让 build 链无谓克隆自己，私有仓库还会 401）；
+      # 外部项目才把仓库/ref 下传给 build.yml。
+      project: ${{ needs.resolve.outputs.external-project == 'true' && format('remote:{0}@{1}', needs.resolve.outputs.project-repo, needs.resolve.outputs.project-ref) || '' }}
+      engine-source: ${{ needs.resolve.outputs.engine-source }}
+      engine-ref: ${{ needs.resolve.outputs.engine-ref }}
+      target: template_release
+      platform: ${{ needs.resolve.outputs.template-platforms }}
+      scons-flags: ${{ needs.resolve.outputs.scons-flags }}
+      profile: ${{ needs.resolve.outputs.profile }}
+      build-profile: ${{ needs.resolve.outputs.build-profile }}
+      caller-uses-ref: ${{ inputs.caller-uses-ref }}
+      force-upload: true
+    secrets:
+      GIT_PAT: ${{ secrets.GIT_PAT }}
+      ENCRYPTION_KEY: ${{ secrets.ENCRYPTION_KEY }}
+
+  export:
+    name: 导出 ${{ matrix.name }}
+    # prefetch 必须在链上：导出作业按 pattern 下载编辑器 artifact，没有 happens-before
+    # 边就可能读到「还在上传」的中间态。预取只是优化（prepare-editor 命中预取目录则
+    # 直接用，否则在线下载），故用 always() 保持「预取失败不阻断导出」。
+    needs: [resolve, build-templates, prefetch]
+    # job 级 if 不可用 matrix 上下文（在 matrix 展开前求值），「本平台无预设」
+    # 的跳过条件下沉到 export-platform.yml 的 export/upload job。
+    if: >-
+      always()
+      && (
+        needs.resolve.outputs.export-type == 'official' ||
+        needs.build-templates.result == 'success'
+      )
+    strategy:
+      fail-fast: false
+      matrix:
+        # 矩阵只声明「导出哪个平台 + 它的特性需求」；执行形态（哪个 runner、哪份编辑器档案）
+        # 由基线 export_host 段决定，经 fromJSON 取值——切换原生/交叉导出只改基线，不动本表。
+        include:
+          - platform: windows
+            name: Windows
+            need-android-sdk: false
+            need-ios-cert: false
+          - platform: linux
+            name: Linux
+            need-android-sdk: false
+            need-ios-cert: false
+          - platform: macos
+            name: macOS
+            need-android-sdk: false
+            need-ios-cert: false
+          - platform: web
+            name: Web
+            need-android-sdk: false
+            need-ios-cert: false
+          - platform: android
+            name: Android
+            need-android-sdk: true
+            need-ios-cert: false
+          - platform: ios
+            name: iOS
+            need-android-sdk: false
+            need-ios-cert: true
+          - platform: visionos
+            name: visionOS
+            need-android-sdk: false
+            need-ios-cert: true
+    uses: $/.github/workflows/export-platform.yml
+    with:
+      project-repo: ${{ needs.resolve.outputs.project-repo }}
+      project-ref: ${{ needs.resolve.outputs.project-ref }}
+      presets: ${{ needs.resolve.outputs[format('presets-{0}', matrix.platform)] }}
+      packages: ${{ needs.resolve.outputs[format('packages-{0}', matrix.platform)] }}
+      editor-version: ${{ needs.resolve.outputs.editor-version }}
+      export-type: ${{ needs.resolve.outputs.export-type }}
+      repo-safe: ${{ needs.resolve.outputs.repo-safe }}
+      platform: ${{ matrix.platform }}
+      templates-pattern: ${{ needs.resolve.outputs[format('templates-pattern-{0}', matrix.platform)] }}
+      project-godot: ${{ needs.resolve.outputs.project-godot }}
+      export-presets-path: ${{ needs.resolve.outputs.export-presets-path }}
+      dist-dir: ${{ needs.resolve.outputs.dist-dir }}
+      ci-repository: ${{ needs.resolve.outputs.ci-repository }}
+      ci-ref: ${{ needs.resolve.outputs.ci-ref }}
+      # 两个平台级配置直接从 platforms-json 一级取（该表已合并契约覆写）
+      editor-platform: ${{ fromJSON(needs.resolve.outputs.platforms-json)[matrix.platform].editor_archive }}
+      runs-on: ${{ fromJSON(needs.resolve.outputs.platforms-json)[matrix.platform].export_runner }}
+      upload-runs-on: ${{ fromJSON(needs.resolve.outputs.runner-json).upload }}
+      need-android-sdk: ${{ matrix.need-android-sdk }}
+      need-ios-cert: ${{ matrix.need-ios-cert }}
+      upload-artifacts: ${{ needs.resolve.outputs.upload-artifacts == 'true' }}
+      retention-export: ${{ needs.resolve.outputs.retention-export }}
+      hooks-bundle: ${{ needs.resolve.outputs.hooks-bundle }}
+      hooks-sha: ${{ needs.resolve.outputs.hooks-sha }}
+      caller-uses-ref: ${{ inputs.caller-uses-ref }}
+    secrets:
+      GIT_PAT: ${{ secrets.GIT_PAT }}
+      ENCRYPTION_KEY: ${{ secrets.ENCRYPTION_KEY }}
+      IOS_CERT_B64: ${{ secrets.IOS_CERT_B64 }}
+      IOS_CERT_PASS: ${{ secrets.IOS_CERT_PASS }}

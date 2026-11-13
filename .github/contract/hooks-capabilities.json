@@ -1,0 +1,31 @@
+{
+  // 能力注册表（扩展机制第二张注册表，与 hooks-anchors.json 同构：锚点 = 时机注册、能力 = 授权注册）。
+  // 唯一权威源：执行器不内置能力列表，run_hooks 从此读取校验钩子的 capabilities/outputs。
+  // 键 = 能力枚举全集，值 = 该能力可产出的 outputs 名单（read:context 无文件产出故为空）。
+  // 通道根与落点路径等执行细节留 run_hooks 代码（CI 布局常量），不在此。
+  "capabilities": {
+    "read:context": [],
+    "write:scons_flags": ["scons_flags"],
+    "write:profile_patch": ["profile_patch"],
+    "write:source_patch": ["source_patch"],
+    "write:artifacts": ["artifacts"],
+    "write:presets": ["presets"],
+    // 直接写项目树（路径由钩子的 write_paths 声明）：无通道产出，故 outputs 为空。
+    // 执行器按 write_paths 建快照、放行、失败回滚；build 链写入并入缓存摘要。
+    "write:project_tree": []
+  },
+
+  // secret:<NAME> 能力的 NAME 白名单，按链分组（键 = build/export/release）。
+  // - 全集 = 各组并集（= 固定 secret 名清单，contract/README.md）：NAME 不在全集
+  //   即拼错，validate 期直接拒绝（防静默拿空值）。
+  // - 本链组 = 该链调用方 job 级 env 真正注入、能取到值的名字。声明的名字不在
+  //   当前链的组里 → validate 期拒绝并给出链名（release 链不注入 IOS_CERT_*，
+  //   声明了也拿不到值，旧实现 validate 放行、dispatch 静默跳过）。
+  // - 值仍由调用方 job 级 env 注入；执行器按声明挑出后仅注入该 hook 子进程。
+  // 改此处 = 改各链白名单；同步 contract/README.md 的「适用链」列。
+  "secret_names": {
+    "build": ["GIT_PAT", "ENCRYPTION_KEY"],
+    "export": ["GIT_PAT", "ENCRYPTION_KEY", "IOS_CERT_B64", "IOS_CERT_PASS"],
+    "release": ["GIT_PAT", "ENCRYPTION_KEY"]
+  }
+}

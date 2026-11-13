@@ -1,0 +1,464 @@
+name: 🔨 Engine Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      # project 不暴露给手动触发：构建链编的是引擎、与项目无关。
+      # 外部项目由导出链经 workflow_call 下传 project，见下方 workflow_call 段。
+      engine-source:
+        description: >-
+          引擎来源 owner/repo[@ref]（如 godotengine/godot@4.7.2-stable）。留空则读契约
+          engine.source；无契约时取 godotengine/godot。
+        required: false
+        default: ""
+        type: string
+      engine-ref:
+        description: >-
+          引擎引用（分支/tag/commit），覆盖 engine-source 里的 @ref。留空则用
+          engine-source 的 @ref；两者都空时自动解析该仓库最新 <N>.<N>[-.<N>]-stable。
+        required: false
+        default: ""
+        type: string
+      target:
+        description: >-
+          构建目标，单个档位 editor / template_debug / template_release；一次运行只产一个 target，
+          传多值 resolve 期 fail-fast（不静默截断）。留空则读契约 engine.target（取唯一值）。
+        required: false
+        default: ""
+        type: string
+      platform:
+        description: >-
+          构建平台，逗号分隔（如 linux,windows）。留空则读契约 engine.platform；无契约时
+          取全部平台（注意 ios / visionos 消耗 macOS runner 配额，建议显式指定）。
+        required: false
+        default: ""
+        type: string
+      scons-flags:
+        description: 附加 SCons 标志（覆写契约 build.scons_flags）。
+        required: false
+        default: ""
+        type: string
+      profile:
+        description: >-
+          SCons profile 来源覆写（覆写契约 build.paths.profile）。空=用契约值；
+          remote:<owner/repo>[@<ref>][:<path>] 或 local:<path>。
+        required: false
+        default: ""
+        type: string
+      build-profile:
+        description: >-
+          build profile（.gdbuild）来源覆写（覆写契约 build.paths.build_profile）。空=用契约值；
+          remote:<owner/repo>[@<ref>][:<path>] 或 local:<path>。
+        required: false
+        default: ""
+        type: string
+      custom-modules:
+        description: >-
+          自定义模块来源条目，逗号分隔（覆写契约 build.modules）。
+          每条写 `remote:<owner/repo>[@<ref>][:<path>]` 或 `local:<path>`。
+        required: false
+        default: ""
+        type: string
+      force-upload:
+        description: 是否把编译产物上传到 Artifacts（需要在本次运行里下载产物时勾选）。
+        required: false
+        default: false
+        type: boolean
+
+  workflow_call:
+    inputs:
+      project:
+        description: 待构建项目来源声明 remote:<owner/repo>[@<ref>]（编译配置来源）。留空则用当前仓库。
+        required: false
+        default: ""
+        type: string
+      engine-source:
+        description: 引擎来源 owner/repo@ref。
+        required: false
+        default: ""
+        type: string
+      engine-ref:
+        description: 引擎引用，覆盖 engine-source 中的 @ref。
+        required: false
+        default: ""
+        type: string
+      target:
+        description: 构建目标，单个档位；传多值 resolve 期 fail-fast（不静默截断）。
+        required: false
+        default: ""
+        type: string
+      platform:
+        description: 构建平台，逗号分隔。
+        required: false
+        default: ""
+        type: string
+      scons-flags:
+        description: 附加 SCons 标志（覆写契约 build.scons_flags）。
+        required: false
+        default: ""
+        type: string
+      profile:
+        description: >-
+          SCons profile 来源（空 / `remote:<owner/repo>[@<ref>][:<path>]` / `local:<path>`）。默认从待构建项目 build/ 生成。
+        required: false
+        default: ""
+        type: string
+      build-profile:
+        description: >-
+          build profile（.gdbuild）来源（空 / `remote:<owner/repo>[@<ref>][:<path>]` / `local:<path>`）。默认从待构建项目 build/ 生成。
+        required: false
+        default: ""
+        type: string
+      custom-modules:
+        description: 自定义模块来源条目，逗号分隔（覆写契约 build.modules）。
+        required: false
+        default: ""
+        type: string
+      force-upload:
+        description: >-
+          强制上传产物到 Artifacts。被复用为上游时必须开启（下游要下载产物），故默认 true。
+        required: false
+        default: true
+        type: boolean
+      caller-uses-ref:
+        description: '调用方 uses: …@<ref> 里的 ref；resolve 期断言与契约 ci.ref / $schema URL 的 ref 段三者一致。'
+        required: false
+        default: ""
+        type: string
+    secrets:
+      GIT_PAT:
+        description: "私有引擎仓库访问令牌。"
+        required: false
+      ENCRYPTION_KEY:
+        description: "Godot PCK 加密密钥（十六进制）。空=不加密。"
+        required: false
+
+  repository_dispatch:
+    types: [godot-build]
+
+permissions:
+  contents: read
+
+concurrency:
+  # 按 ref + 引擎来源区分：同分支同来源串行，不取消进行中的构建。
+  # 来源维度的取值顺序与 resolve 一致：手动/被调用传的 input 优先，其次是
+  # repository_dispatch 的 client_payload.source（resolve_build 也从这里读）。
+  # 两处都不给才落到占位段——那时确实没有任何来源可区分，占位是语义的一部分。
+  group: build-${{ github.ref }}-${{ inputs.engine-source || github.event.client_payload.source || 'default' }}  # noqa: fallback
+  cancel-in-progress: false
+
+jobs:
+  # Chain Runner Bootstrap（workflows/runner.yml）：resolve 作业的分配先于契约可读，
+  # runner 取基线 roles.resolve（不可覆写）；下游平台作业读 platforms-json 的 build_runner。
+  runner:
+    name: 引导链式运行器
+    uses: $/.github/workflows/runner.yml
+    secrets:
+      GIT_PAT: ${{ secrets.GIT_PAT }}
+
+  resolve:
+    name: 解析构建参数
+    needs: runner
+    runs-on: ${{ fromJSON(needs.runner.outputs.runner-json).resolve }}
+    timeout-minutes: 10
+    outputs:
+      platforms: ${{ steps.resolve.outputs.platforms }}
+      engine-repo: ${{ steps.resolve.outputs.engine-repo }}
+      repo-safe: ${{ steps.resolve.outputs.repo-safe }}
+      engine-ref: ${{ steps.resolve.outputs.engine-ref }}
+      engine-sha: ${{ steps.resolve.outputs.engine-sha }}
+      target: ${{ steps.resolve.outputs.target }}
+      profile: ${{ steps.resolve.outputs.profile }}
+      build-profile: ${{ steps.resolve.outputs.build-profile }}
+      custom-modules: ${{ steps.resolve.outputs.custom-modules }}
+      project-repo: ${{ steps.resolve.outputs.project-repo }}
+      project-ref: ${{ steps.resolve.outputs.project-ref }}
+      upload-artifacts: ${{ steps.resolve.outputs.upload-artifacts }}
+      scons-flags: ${{ steps.resolve.outputs.scons-flags }}
+      compat-standard-includes-linux: ${{ steps.resolve.outputs.compat-standard-includes-linux }}
+      compat-standard-includes-windows: ${{ steps.resolve.outputs.compat-standard-includes-windows }}
+      compat-standard-includes-macos: ${{ steps.resolve.outputs.compat-standard-includes-macos }}
+      compat-standard-includes-android: ${{ steps.resolve.outputs.compat-standard-includes-android }}
+      compat-standard-includes-ios: ${{ steps.resolve.outputs.compat-standard-includes-ios }}
+      compat-standard-includes-visionos: ${{ steps.resolve.outputs.compat-standard-includes-visionos }}
+      compat-standard-includes-web: ${{ steps.resolve.outputs.compat-standard-includes-web }}
+      retention-build: ${{ steps.resolve.outputs.retention-build }}
+      toolchain-json: ${{ steps.resolve.outputs.toolchain-json }}
+      runner-json: ${{ steps.resolve.outputs.runner-json }}
+      platforms-json: ${{ steps.resolve.outputs.platforms-json }}
+      hooks-bundle: ${{ steps.resolve.outputs.hooks-bundle }}
+      hooks-sha: ${{ steps.resolve.outputs.hooks-sha }}
+      ci-repository: ${{ steps.resolve.outputs.ci-repository }}
+      ci-ref: ${{ steps.resolve.outputs.ci-ref }}
+      artifact-prefix: ${{ steps.resolve.outputs.artifact-prefix }}
+      artifact-build-naming: ${{ steps.resolve.outputs.artifact-build-naming }}
+    steps:
+      # 项目仓库检出：契约（ci-contract.json）的来源。跨仓场景下 caller 仓库只有契约 + 薄触发器。
+      - name: 检出仓库
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+
+      # CI 资产检出：job.workflow_* 即正在运行的这份工作流所属仓库（跨仓 called workflow 下为 CI 资产仓库）。
+      - name: 检出 CI 资产
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ job.workflow_repository || github.repository }}
+          ref: ${{ job.workflow_sha || github.sha }}
+          token: ${{ secrets.GIT_PAT || github.token }}
+          path: ci-support
+          fetch-depth: 1
+          filter: blob:none
+          sparse-checkout: .github
+
+      - name: 解析构建参数
+        id: resolve
+        uses: ./ci-support/.github/actions/resolve-build
+        # 契约取项目仓库那份（root 检出），不是 CI 资产仓库自带的那份模板契约。
+        env:
+          CI_CONTRACT: ${{ github.workspace }}/.github/ci-contract.json
+          # 本次运行的 CI 资产身份：单仓自用与跨仓形态都由它自描述，无需契约填自己。
+          WORKFLOW_REPOSITORY: ${{ job.workflow_repository || github.repository }}
+          WORKFLOW_SHA: ${{ job.workflow_sha || github.sha }}
+        with:
+          project: ${{ inputs.project }}
+          engine-source: ${{ inputs.engine-source }}
+          engine-ref: ${{ inputs.engine-ref }}
+          target: ${{ inputs.target }}
+          platform: ${{ inputs.platform }}
+          scons-flags: ${{ inputs.scons-flags }}
+          profile: ${{ inputs.profile }}
+          build-profile: ${{ inputs.build-profile }}
+          custom-modules: ${{ inputs.custom-modules }}
+          force-upload: ${{ inputs.force-upload }}
+          caller-uses-ref: ${{ inputs.caller-uses-ref }}
+          repo-token: ${{ secrets.GIT_PAT }}
+
+  linux-build:
+    name: Linux 编译
+    needs: resolve
+    if: contains(fromJSON(needs.resolve.outputs.platforms), 'linux')
+    uses: $/.github/workflows/linux-build.yml
+    with:
+      runs-on: ${{ fromJSON(needs.resolve.outputs.platforms-json).linux.build_runner }}
+      engine-repo: ${{ needs.resolve.outputs.engine-repo }}
+      repo-safe: ${{ needs.resolve.outputs.repo-safe }}
+      engine-sha: ${{ needs.resolve.outputs.engine-sha }}
+      engine-ref: ${{ needs.resolve.outputs.engine-ref }}
+      target: ${{ needs.resolve.outputs.target }}
+      profile: ${{ needs.resolve.outputs.profile }}
+      build-profile: ${{ needs.resolve.outputs.build-profile }}
+      custom-modules: ${{ needs.resolve.outputs.custom-modules }}
+      project-repo: ${{ needs.resolve.outputs.project-repo }}
+      project-ref: ${{ needs.resolve.outputs.project-ref }}
+      upload-artifacts: ${{ needs.resolve.outputs.upload-artifacts == 'true' }}
+      scons-flags: ${{ needs.resolve.outputs.scons-flags }}
+      compat-standard-includes: ${{ needs.resolve.outputs.compat-standard-includes-linux }}
+      retention-build: ${{ needs.resolve.outputs.retention-build }}
+      toolchain-json: ${{ needs.resolve.outputs.toolchain-json }}
+      hooks-bundle: ${{ needs.resolve.outputs.hooks-bundle }}
+      hooks-sha: ${{ needs.resolve.outputs.hooks-sha }}
+      ci-repository: ${{ needs.resolve.outputs.ci-repository }}
+      ci-ref: ${{ needs.resolve.outputs.ci-ref }}
+      artifact-prefix: ${{ needs.resolve.outputs.artifact-prefix }}
+      artifact-build-naming: ${{ needs.resolve.outputs.artifact-build-naming }}
+    secrets:
+      GIT_PAT: ${{ secrets.GIT_PAT }}
+      ENCRYPTION_KEY: ${{ secrets.ENCRYPTION_KEY }}
+
+  windows-build:
+    name: Windows 编译
+    needs: resolve
+    if: contains(fromJSON(needs.resolve.outputs.platforms), 'windows')
+    uses: $/.github/workflows/windows-build.yml
+    with:
+      runs-on: ${{ fromJSON(needs.resolve.outputs.platforms-json).windows.build_runner }}
+      engine-repo: ${{ needs.resolve.outputs.engine-repo }}
+      repo-safe: ${{ needs.resolve.outputs.repo-safe }}
+      engine-sha: ${{ needs.resolve.outputs.engine-sha }}
+      engine-ref: ${{ needs.resolve.outputs.engine-ref }}
+      target: ${{ needs.resolve.outputs.target }}
+      profile: ${{ needs.resolve.outputs.profile }}
+      build-profile: ${{ needs.resolve.outputs.build-profile }}
+      custom-modules: ${{ needs.resolve.outputs.custom-modules }}
+      project-repo: ${{ needs.resolve.outputs.project-repo }}
+      project-ref: ${{ needs.resolve.outputs.project-ref }}
+      upload-artifacts: ${{ needs.resolve.outputs.upload-artifacts == 'true' }}
+      scons-flags: ${{ needs.resolve.outputs.scons-flags }}
+      compat-standard-includes: ${{ needs.resolve.outputs.compat-standard-includes-windows }}
+      retention-build: ${{ needs.resolve.outputs.retention-build }}
+      toolchain-json: ${{ needs.resolve.outputs.toolchain-json }}
+      hooks-bundle: ${{ needs.resolve.outputs.hooks-bundle }}
+      hooks-sha: ${{ needs.resolve.outputs.hooks-sha }}
+      ci-repository: ${{ needs.resolve.outputs.ci-repository }}
+      ci-ref: ${{ needs.resolve.outputs.ci-ref }}
+      artifact-prefix: ${{ needs.resolve.outputs.artifact-prefix }}
+      artifact-build-naming: ${{ needs.resolve.outputs.artifact-build-naming }}
+    secrets:
+      GIT_PAT: ${{ secrets.GIT_PAT }}
+      ENCRYPTION_KEY: ${{ secrets.ENCRYPTION_KEY }}
+
+  macos-build:
+    name: macOS 编译
+    needs: resolve
+    if: contains(fromJSON(needs.resolve.outputs.platforms), 'macos')
+    uses: $/.github/workflows/macos-build.yml
+    with:
+      runs-on: ${{ fromJSON(needs.resolve.outputs.platforms-json).macos.build_runner }}
+      engine-repo: ${{ needs.resolve.outputs.engine-repo }}
+      repo-safe: ${{ needs.resolve.outputs.repo-safe }}
+      engine-sha: ${{ needs.resolve.outputs.engine-sha }}
+      engine-ref: ${{ needs.resolve.outputs.engine-ref }}
+      target: ${{ needs.resolve.outputs.target }}
+      profile: ${{ needs.resolve.outputs.profile }}
+      build-profile: ${{ needs.resolve.outputs.build-profile }}
+      custom-modules: ${{ needs.resolve.outputs.custom-modules }}
+      project-repo: ${{ needs.resolve.outputs.project-repo }}
+      project-ref: ${{ needs.resolve.outputs.project-ref }}
+      upload-artifacts: ${{ needs.resolve.outputs.upload-artifacts == 'true' }}
+      scons-flags: ${{ needs.resolve.outputs.scons-flags }}
+      compat-standard-includes: ${{ needs.resolve.outputs.compat-standard-includes-macos }}
+      retention-build: ${{ needs.resolve.outputs.retention-build }}
+      toolchain-json: ${{ needs.resolve.outputs.toolchain-json }}
+      hooks-bundle: ${{ needs.resolve.outputs.hooks-bundle }}
+      hooks-sha: ${{ needs.resolve.outputs.hooks-sha }}
+      ci-repository: ${{ needs.resolve.outputs.ci-repository }}
+      ci-ref: ${{ needs.resolve.outputs.ci-ref }}
+      artifact-prefix: ${{ needs.resolve.outputs.artifact-prefix }}
+      artifact-build-naming: ${{ needs.resolve.outputs.artifact-build-naming }}
+    secrets:
+      GIT_PAT: ${{ secrets.GIT_PAT }}
+      ENCRYPTION_KEY: ${{ secrets.ENCRYPTION_KEY }}
+
+  android-build:
+    name: Android 编译
+    needs: resolve
+    if: contains(fromJSON(needs.resolve.outputs.platforms), 'android')
+    uses: $/.github/workflows/android-build.yml
+    with:
+      runs-on: ${{ fromJSON(needs.resolve.outputs.platforms-json).android.build_runner }}
+      engine-repo: ${{ needs.resolve.outputs.engine-repo }}
+      repo-safe: ${{ needs.resolve.outputs.repo-safe }}
+      engine-sha: ${{ needs.resolve.outputs.engine-sha }}
+      engine-ref: ${{ needs.resolve.outputs.engine-ref }}
+      target: ${{ needs.resolve.outputs.target }}
+      profile: ${{ needs.resolve.outputs.profile }}
+      build-profile: ${{ needs.resolve.outputs.build-profile }}
+      custom-modules: ${{ needs.resolve.outputs.custom-modules }}
+      project-repo: ${{ needs.resolve.outputs.project-repo }}
+      project-ref: ${{ needs.resolve.outputs.project-ref }}
+      upload-artifacts: ${{ needs.resolve.outputs.upload-artifacts == 'true' }}
+      scons-flags: ${{ needs.resolve.outputs.scons-flags }}
+      compat-standard-includes: ${{ needs.resolve.outputs.compat-standard-includes-android }}
+      retention-build: ${{ needs.resolve.outputs.retention-build }}
+      toolchain-json: ${{ needs.resolve.outputs.toolchain-json }}
+      hooks-bundle: ${{ needs.resolve.outputs.hooks-bundle }}
+      hooks-sha: ${{ needs.resolve.outputs.hooks-sha }}
+      ci-repository: ${{ needs.resolve.outputs.ci-repository }}
+      ci-ref: ${{ needs.resolve.outputs.ci-ref }}
+      artifact-prefix: ${{ needs.resolve.outputs.artifact-prefix }}
+      artifact-build-naming: ${{ needs.resolve.outputs.artifact-build-naming }}
+    secrets:
+      GIT_PAT: ${{ secrets.GIT_PAT }}
+      ENCRYPTION_KEY: ${{ secrets.ENCRYPTION_KEY }}
+
+  ios-build:
+    name: iOS 编译
+    needs: resolve
+    if: contains(fromJSON(needs.resolve.outputs.platforms), 'ios')
+    uses: $/.github/workflows/ios-visionos-build.yml
+    with:
+      runs-on: ${{ fromJSON(needs.resolve.outputs.platforms-json).ios.build_runner }}
+      engine-repo: ${{ needs.resolve.outputs.engine-repo }}
+      repo-safe: ${{ needs.resolve.outputs.repo-safe }}
+      engine-sha: ${{ needs.resolve.outputs.engine-sha }}
+      engine-ref: ${{ needs.resolve.outputs.engine-ref }}
+      target: ${{ needs.resolve.outputs.target }}
+      platform: ios
+      profile: ${{ needs.resolve.outputs.profile }}
+      build-profile: ${{ needs.resolve.outputs.build-profile }}
+      custom-modules: ${{ needs.resolve.outputs.custom-modules }}
+      project-repo: ${{ needs.resolve.outputs.project-repo }}
+      project-ref: ${{ needs.resolve.outputs.project-ref }}
+      upload-artifacts: ${{ needs.resolve.outputs.upload-artifacts == 'true' }}
+      scons-flags: ${{ needs.resolve.outputs.scons-flags }}
+      compat-standard-includes: ${{ needs.resolve.outputs.compat-standard-includes-ios }}
+      retention-build: ${{ needs.resolve.outputs.retention-build }}
+      toolchain-json: ${{ needs.resolve.outputs.toolchain-json }}
+      hooks-bundle: ${{ needs.resolve.outputs.hooks-bundle }}
+      hooks-sha: ${{ needs.resolve.outputs.hooks-sha }}
+      ci-repository: ${{ needs.resolve.outputs.ci-repository }}
+      ci-ref: ${{ needs.resolve.outputs.ci-ref }}
+      artifact-prefix: ${{ needs.resolve.outputs.artifact-prefix }}
+      artifact-build-naming: ${{ needs.resolve.outputs.artifact-build-naming }}
+    secrets:
+      GIT_PAT: ${{ secrets.GIT_PAT }}
+      ENCRYPTION_KEY: ${{ secrets.ENCRYPTION_KEY }}
+
+  visionos-build:
+    name: visionOS 编译
+    needs: resolve
+    if: contains(fromJSON(needs.resolve.outputs.platforms), 'visionos')
+    uses: $/.github/workflows/ios-visionos-build.yml
+    with:
+      runs-on: ${{ fromJSON(needs.resolve.outputs.platforms-json).visionos.build_runner }}
+      engine-repo: ${{ needs.resolve.outputs.engine-repo }}
+      repo-safe: ${{ needs.resolve.outputs.repo-safe }}
+      engine-sha: ${{ needs.resolve.outputs.engine-sha }}
+      engine-ref: ${{ needs.resolve.outputs.engine-ref }}
+      target: ${{ needs.resolve.outputs.target }}
+      platform: visionos
+      profile: ${{ needs.resolve.outputs.profile }}
+      build-profile: ${{ needs.resolve.outputs.build-profile }}
+      custom-modules: ${{ needs.resolve.outputs.custom-modules }}
+      project-repo: ${{ needs.resolve.outputs.project-repo }}
+      project-ref: ${{ needs.resolve.outputs.project-ref }}
+      upload-artifacts: ${{ needs.resolve.outputs.upload-artifacts == 'true' }}
+      scons-flags: ${{ needs.resolve.outputs.scons-flags }}
+      compat-standard-includes: ${{ needs.resolve.outputs.compat-standard-includes-visionos }}
+      retention-build: ${{ needs.resolve.outputs.retention-build }}
+      toolchain-json: ${{ needs.resolve.outputs.toolchain-json }}
+      hooks-bundle: ${{ needs.resolve.outputs.hooks-bundle }}
+      hooks-sha: ${{ needs.resolve.outputs.hooks-sha }}
+      ci-repository: ${{ needs.resolve.outputs.ci-repository }}
+      ci-ref: ${{ needs.resolve.outputs.ci-ref }}
+      artifact-prefix: ${{ needs.resolve.outputs.artifact-prefix }}
+      artifact-build-naming: ${{ needs.resolve.outputs.artifact-build-naming }}
+    secrets:
+      GIT_PAT: ${{ secrets.GIT_PAT }}
+      ENCRYPTION_KEY: ${{ secrets.ENCRYPTION_KEY }}
+
+  web-build:
+    name: Web 编译
+    needs: resolve
+    if: contains(fromJSON(needs.resolve.outputs.platforms), 'web')
+    uses: $/.github/workflows/web-build.yml
+    with:
+      runs-on: ${{ fromJSON(needs.resolve.outputs.platforms-json).web.build_runner }}
+      engine-repo: ${{ needs.resolve.outputs.engine-repo }}
+      repo-safe: ${{ needs.resolve.outputs.repo-safe }}
+      engine-sha: ${{ needs.resolve.outputs.engine-sha }}
+      engine-ref: ${{ needs.resolve.outputs.engine-ref }}
+      target: ${{ needs.resolve.outputs.target }}
+      profile: ${{ needs.resolve.outputs.profile }}
+      build-profile: ${{ needs.resolve.outputs.build-profile }}
+      custom-modules: ${{ needs.resolve.outputs.custom-modules }}
+      project-repo: ${{ needs.resolve.outputs.project-repo }}
+      project-ref: ${{ needs.resolve.outputs.project-ref }}
+      upload-artifacts: ${{ needs.resolve.outputs.upload-artifacts == 'true' }}
+      scons-flags: ${{ needs.resolve.outputs.scons-flags }}
+      compat-standard-includes: ${{ needs.resolve.outputs.compat-standard-includes-web }}
+      retention-build: ${{ needs.resolve.outputs.retention-build }}
+      toolchain-json: ${{ needs.resolve.outputs.toolchain-json }}
+      hooks-bundle: ${{ needs.resolve.outputs.hooks-bundle }}
+      hooks-sha: ${{ needs.resolve.outputs.hooks-sha }}
+      ci-repository: ${{ needs.resolve.outputs.ci-repository }}
+      ci-ref: ${{ needs.resolve.outputs.ci-ref }}
+      artifact-prefix: ${{ needs.resolve.outputs.artifact-prefix }}
+      artifact-build-naming: ${{ needs.resolve.outputs.artifact-build-naming }}
+      # Web 变体矩阵由基线 platforms.web.variants 渲染：与导出侧下载
+      # pattern 消费同一份 platforms-json，工作流内不再内联变体 / scons 参数。
+      web-variants-json: ${{ toJSON(fromJSON(needs.resolve.outputs.platforms-json).web.variants) }}
+    secrets:
+      GIT_PAT: ${{ secrets.GIT_PAT }}
+      ENCRYPTION_KEY: ${{ secrets.ENCRYPTION_KEY }}

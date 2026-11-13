@@ -1,0 +1,328 @@
+name: ~ 🚀 Project Release
+
+# 职责分离（docs/ci-architecture.md）：Release 只在自有项目构建时由项目仓库推 v* Tag 触发，
+# 附件恒落在 github.repository。外部项目构建只产 Artifact 到 CI 仓库，
+# 不调用本工作流、不创建任何 Release、不持有外部项目写凭证。
+#
+# 本工作流在 CI 资产仓库恒为 workflow_call（由项目仓库的薄触发器调用）：
+# 手动入口属于项目仓库那一侧，其 workflow_dispatch 触发本工作流的 workflow_call。
+# CI 仓库自己没有 project 输入，若在此开手动入口只会导出 CI 仓库并给它发 Release——
+# 既无意义，也违反「CI 仓库不创建任何 Release」的定位。
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: 要发布到 Release 的 Tag；留空取触发的 Tag。
+        required: false
+        default: ""
+        type: string
+      export-type:
+        description: official=官方模板；custom_build=先编译导出模板。留空读契约 export.type。
+        required: false
+        default: custom_build
+        type: string
+      presets:
+        description: 要导出的预设名（被导出项目 export_presets.cfg 中的 name，逗号分隔）。留空读契约 export.presets。
+        required: false
+        default: ""
+        type: string
+      editor-version:
+        description: 官方编辑器版本。留空读契约 export.editor_version。
+        required: false
+        default: ""
+        type: string
+      scons-flags:
+        description: 编译导出模板时的附加 SCons 标志（覆写契约 build.scons_flags）；仅 custom_build 生效。
+        required: false
+        default: ""
+        type: string
+      profile:
+        description: 编译导出模板时的 SCons profile 来源覆写（覆写契约 build.paths.profile）；仅 custom_build 生效。
+        required: false
+        default: ""
+        type: string
+      build-profile:
+        description: 编译导出模板时的 build profile 来源覆写（覆写契约 build.paths.build_profile）；仅 custom_build 生效。
+        required: false
+        default: ""
+        type: string
+      draft:
+        description: Release 不存在时，创建为草稿（不公开发布）。
+        required: false
+        default: false
+        type: boolean
+      caller-uses-ref:
+        description: 调用方 uses:…@<ref> 的 ref；resolve 期断言与契约 ci.ref / $schema URL 的 ref 段一致。
+        required: false
+        default: ""
+        type: string
+    # 显式声明接收的 secret，调用方才能做自定义名映射（如 GIT_PAT: ${{ secrets.MY_PAT }}）。
+    # 不声明时调用方只能 secrets: inherit，无法改名——而改名正是私有仓库的常态。
+    secrets:
+      GIT_PAT:
+        description: 私有仓库访问令牌（检出项目 / CI 资产、发布附件）。
+        required: false
+      ENCRYPTION_KEY:
+        description: Godot PCK 加密密钥（十六进制，32 字节）；仅 custom_build 生效。
+        required: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Chain Runner Bootstrap（workflows/runner.yml）：resolve-hooks 作业的分配先于契约可读，
+  # runner 取基线 roles.resolve（不可覆写）；publish 读 resolve-hooks 输出的 runner-json。
+  runner:
+    name: 引导链式运行器
+    uses: $/.github/workflows/runner.yml
+    secrets:
+      GIT_PAT: ${{ secrets.GIT_PAT }}
+
+  export:
+    name: 导出成品
+    uses: $/.github/workflows/export.yml
+    with:
+      # 触发器仓库只能指向自己：Release 恒属于 github.repository。
+      # 手动填 tag 时按该 tag 导出（仍指向自己仓库），否则取触发上下文。
+      project: >-
+        ${{ inputs.tag != '' && format('remote:{0}@{1}', github.repository, inputs.tag) || '' }}
+      presets: ${{ inputs.presets }}
+      export-type: ${{ inputs.export-type }}
+      editor-version: ${{ inputs.editor-version }}
+      scons-flags: ${{ inputs.scons-flags }}
+      profile: ${{ inputs.profile }}
+      build-profile: ${{ inputs.build-profile }}
+      caller-uses-ref: ${{ inputs.caller-uses-ref }}
+    secrets: inherit
+  # release 链的 resolve 期（与 build/export 链结构一致）：离线校验扩展清单、
+  # 产 release 链 plan 并打 bundle。无清单 / policy=off 时 hooks-bundle 为空串，
+  # publish job 整条扩展链短路（空转零成本）。
+  resolve-hooks:
+    name: 解析扩展链
+    needs: runner
+    runs-on: ${{ fromJSON(needs.runner.outputs.runner-json).resolve }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      hooks-bundle: ${{ steps.bundle.outputs.hooks-bundle }}
+      hooks-sha: ${{ steps.bundle.outputs.hooks-sha }}
+      runner-json: ${{ steps.contract.outputs.runner-json }}
+    steps:
+      # 检出项目仓库：契约与扩展清单 / 脚本闭包的来源。手动填 tag 时按该 tag 检出，
+      # 否则用触发上下文（Tag 推送时即 tag commit）。
+      - name: 检出项目仓库
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ inputs.tag != '' && inputs.tag || github.sha }}
+          path: project
+
+      # CI 资产检出：job.workflow_* 即正在运行的这份工作流所属仓库（跨仓 called workflow 下为 CI 资产仓库）。
+      - name: 检出 CI 资产
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ job.workflow_repository || github.repository }}
+          ref: ${{ job.workflow_sha || github.sha }}
+          token: ${{ secrets.GIT_PAT || github.token }}
+          path: ci-support
+          filter: blob:none
+          sparse-checkout: |
+            .github/contract
+            .github/scripts
+
+      - name: 解析契约归一化输出
+        id: contract
+        shell: bash
+        env:
+          CI_CONTRACT: ${{ github.workspace }}/project/.github/ci-contract.json
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_SHA: ${{ github.sha }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_WORKSPACE: ${{ github.workspace }}
+          RUNNER_OS: ${{ runner.os }}
+          CALLER_USES_REF: ${{ inputs.caller-uses-ref }}
+          WORKFLOW_REPOSITORY: ${{ job.workflow_repository || github.repository }}
+          WORKFLOW_SHA: ${{ job.workflow_sha || github.sha }}
+        run: python ci-support/.github/scripts/godot_context.py --outputs
+
+      - name: 生成运行时上下文
+        id: context
+        shell: bash
+        env:
+          CI_CONTRACT: ${{ github.workspace }}/project/.github/ci-contract.json
+          PROJECT_ROOT: ${{ github.workspace }}/project
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_SHA: ${{ github.sha }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_WORKSPACE: ${{ github.workspace }}
+          RUNNER_OS: ${{ runner.os }}
+          CALLER_USES_REF: ${{ inputs.caller-uses-ref }}
+        run: |
+          # repo-safe 取仓库末段（artifact 前缀兜底，与 resolve_export 同口径）
+          export REPO_SAFE="${GITHUB_REPOSITORY##*/}"
+          # 手动填 tag 时按 tag 指向的真实 commit 生成 context（触发上下文的 sha 是分支 head）
+          PROJ_SHA=$(git -C project rev-parse HEAD)
+          GITHUB_SHA="$PROJ_SHA" python ci-support/.github/scripts/godot_context.py \
+            --resolve --chain release --out context.json
+
+      - name: 校验并打包扩展清单
+        id: bundle
+        shell: bash
+        env:
+          HOOKS_MANIFEST: ${{ steps.contract.outputs.hooks-manifest }}
+          HOOKS_POLICY: ${{ steps.contract.outputs.hooks-policy }}
+        run: |
+          python ci-support/.github/scripts/run_hooks.py validate \
+            --manifest "project/$HOOKS_MANIFEST" --policy "$HOOKS_POLICY" \
+            --chain release --context context.json \
+            --out plan.json --bundle-out hooks-bundle
+
+      - name: 上传扩展包
+        if: steps.bundle.outputs.hooks-bundle != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.bundle.outputs.hooks-bundle }}
+          path: hooks-bundle/
+          if-no-files-found: error
+          retention-days: ${{ steps.contract.outputs.retention-contract }}
+
+  publish:
+    name: 发布 Release
+    needs: [export, resolve-hooks]
+    runs-on: ${{ fromJSON(needs.resolve-hooks.outputs.runner-json).publish }}
+    timeout-minutes: 15
+    env:
+      # secret:<NAME> 钩子能力的值通道：按固定名注入，执行器按清单声明挑出、仅注入该 hook 子进程。
+      GIT_PAT: ${{ secrets.GIT_PAT }}
+      ENCRYPTION_KEY: ${{ secrets.ENCRYPTION_KEY }}
+    steps:
+      - name: 检出 CI 资产
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ job.workflow_repository || github.repository }}
+          ref: ${{ job.workflow_sha || github.sha }}
+          token: ${{ secrets.GIT_PAT || github.token }}
+          path: ci-support
+          filter: blob:none
+          sparse-checkout: |
+            .github/actions/hooks
+            .github/actions/release-upload
+            .github/contract
+            .github/scripts
+
+      - name: 检出项目仓库
+        if: needs.resolve-hooks.outputs.hooks-bundle != ''
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ inputs.tag != '' && inputs.tag || github.sha }}
+          path: project
+
+      # 按 artifact 分目录下载；collect_release_assets.py 兼容平铺与分目录
+      - name: 下载导出产物
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: artifacts
+          pattern: export-*
+
+      - name: 收集产物
+        shell: bash
+        run: python ci-support/.github/scripts/collect_release_assets.py --src artifacts --dist assets
+
+      - name: 下载扩展包
+        if: needs.resolve-hooks.outputs.hooks-bundle != ''
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ needs.resolve-hooks.outputs.hooks-bundle }}
+          path: hooks-bundle
+
+      - name: 生成运行时上下文
+        if: needs.resolve-hooks.outputs.hooks-bundle != ''
+        shell: bash
+        env:
+          CI_CONTRACT: ${{ github.workspace }}/project/.github/ci-contract.json
+          PROJECT_ROOT: ${{ github.workspace }}/project
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_SHA: ${{ github.sha }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_WORKSPACE: ${{ github.workspace }}
+          RUNNER_OS: ${{ runner.os }}
+          CALLER_USES_REF: ${{ inputs.caller-uses-ref }}
+        run: |
+          export REPO_SAFE="${GITHUB_REPOSITORY##*/}"
+          PROJ_SHA=$(git -C project rev-parse HEAD)
+          GITHUB_SHA="$PROJ_SHA" python ci-support/.github/scripts/godot_context.py \
+            --resolve --chain release --out context.json
+
+      # publish:before：附件上传之前；write:artifacts 产出由 apply_hook_outputs 合并进 assets/
+      - name: 扩展 publish:before
+        if: needs.resolve-hooks.outputs.hooks-bundle != ''
+        uses: ./ci-support/.github/actions/hooks
+        with:
+          anchor: publish
+          phase: before
+          chain: release
+          hooks-bundle: ${{ needs.resolve-hooks.outputs.hooks-bundle }}
+          context: context.json
+          plan: hooks-bundle/plan.json
+          bundle-dir: hooks-bundle
+
+      - name: 应用扩展产物
+        if: needs.resolve-hooks.outputs.hooks-bundle != ''
+        shell: bash
+        run: |
+          python ci-support/.github/scripts/apply_hook_outputs.py \
+            --result hooks-result.json --kind artifacts --dist assets
+
+      - name: 上传附件到 Release
+        uses: ./ci-support/.github/actions/release-upload
+        with:
+          tag: ${{ inputs.tag || (github.ref_type == 'tag' && github.ref_name || '') }}
+          assets-dir: assets
+          generate-notes: true
+          draft: ${{ inputs.draft }}
+
+      # 清理陈旧附件：--clobber 只覆盖同名文件，产物命名一旦变化（改名、增删预设、
+      # 模板调整），上一轮旧附件会永久滞留并与本次产物混在一起。判据见脚本头部：
+      # 完整性门控 + 家族限定 + 期望集合，三者任一不成立即跳过（宁可漏删不误删）。
+      - name: 清理陈旧附件
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_TAG: ${{ inputs.tag }}
+          TAG_FROM_REF: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+          REPO: ${{ github.repository }}
+          ARTIFACT_PREFIX: ${{ needs.export.outputs.artifact-prefix }}
+          EXPORT_COMPLETE: ${{ needs.export.outputs.export-complete }}
+        run: |
+          TAG="${INPUT_TAG:-${TAG_FROM_REF}}"
+          [ -n "$TAG" ] || { echo "::error::无法确定要发布的 Tag"; exit 1; }
+          python ci-support/.github/scripts/prune_release_assets.py \
+            --repo "$REPO" --tag "$TAG" \
+            --prefix "$ARTIFACT_PREFIX" --expected assets \
+            --complete "${EXPORT_COMPLETE:-false}"
+
+      # publish:after：附件上传完成后（通知 / 公告类钩子）；失败即 job 失败（on_error=fail 时）
+      - name: 扩展 publish:after
+        if: needs.resolve-hooks.outputs.hooks-bundle != ''
+        uses: ./ci-support/.github/actions/hooks
+        with:
+          anchor: publish
+          phase: after
+          chain: release
+          hooks-bundle: ${{ needs.resolve-hooks.outputs.hooks-bundle }}
+          context: context.json
+          plan: hooks-bundle/plan.json
+          bundle-dir: hooks-bundle

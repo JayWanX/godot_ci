@@ -1,0 +1,87 @@
+{
+  // 项目契约模板：复制到项目仓库的 .github/ci-contract.json（布局同本目录，无需重命名）。
+  // 字段唯一权威源是 CI 仓库的 .github/contract/contract.schema.json（不在本包内，
+  // 由 $schema URL 指过去，仅供编辑器补全）；默认值在 schema default 与平台基线。
+  // 全字段说明与用法见同目录 CI-USAGE.md。
+  "$schema": "https://raw.githubusercontent.com/JayWanX/godot_ci/main/.github/contract/contract.schema.json",
+
+  // CI 资产仓库坐标。跨仓形态必填；单仓自用可省略整段。
+  // ref 跟随 CI 仓库更新；锁版本 / 搬家时的同步变更点见同目录 CI-USAGE.md「锁版本与 CI 仓库搬家」。
+  "ci": { "repository": "JayWanX/godot_ci", "ref": "main" },
+
+  // 引擎：编译选项（arch / threads / 优化 / 裁剪）不在此，由项目侧 profile.py 与 scons_flags 控制
+  "engine": {
+    "source": "godotengine/godot@<version>-stable", // 按项目实际引擎版本填写
+    "target": ["template_release"], // 一次运行只产一个档位（取数组第一个值）：editor / template_debug / template_release
+    "platform": ["linux", "windows"] // 按需增补；ios / visionos 消耗 macOS 配额，勿照抄全量
+  },
+
+  // 构建配置来源，条目语法见同目录 CI-USAGE.md「来源声明语法」（前缀必须显式写）。
+  // local 指向的文件缺失时解析期只提示并跳过注入，构建用引擎默认配置继续。
+  "build": {
+    "paths": {
+      "profile": "local:build/profile.py",
+      "build_profile": "local:build/project.gdbuild"
+    },
+    // 自定义模块清单；目录名由模块自己的 register_types 注册名解析，重复条目解析期报错。
+    // 留空 = 不加模块。条目语法同来源声明（见 CI-USAGE.md「来源声明语法」）。
+    "modules": [
+      // "remote:myorg/my-module@main:modules/my_module",
+      // "local:modules/local_module"
+    ],
+    "scons_flags": "", // 附加 SCons 命令行标志（空格分隔）
+    "compat": { "standard_includes": "auto" }, // auto=跟随基线底值 + skip 规则；on/off 强制
+    // 覆写工具链版本（键：emsdk / java / scons）。留空对象 = 全部跟随基线，按需只写要改的键。
+    // 导出用的编辑器档案不在这里：它随平台走，见 platforms.<平台>.editor_archive。
+    "toolchain": {}
+  },
+
+  // 导出。type：custom_build = CI 按契约引擎自编译导出模板（与引擎同版本同精度，
+  // editor_version 须与引擎 major.minor 一致）；official = 官方编辑器与官方导出模板
+  // （引擎为自编译 / 改精度构建时不适用）。project.godot 与 export_presets.cfg 必须真实
+  // 存在，导出链校验缺失即报错；presets 为导出白名单（留空 = 全部预设），预设名拼错
+  // 解析期报错，不静默丢产物。
+  "export": {
+    "type": "custom_build",
+    "editor_version": "<version>-stable", // 须与引擎版本兼容，否则 PCK 版本校验拒绝
+    "presets": ["Windows Desktop", "Linux/X11", "macOS"],
+    "paths": {
+      "project_godot": "project.godot",
+      "export_presets": "export_presets.cfg",
+      "dist": "bin" // 同时作为预设 export_path 基目录与实际输出目录，两者必须一致
+    }
+  },
+
+  // 产物命名：两套模板，按对象划分。prefix 留空取仓库安全名。
+  // build_naming（编译产物）：{prefix} {platform} {target} {arch} {variant}；
+  //   模板未含 {arch} / {variant} 时按需自动追加维度后缀。
+  // export_naming（导出产物 / Release 附件）：{prefix} {platform} {preset}；
+  //   默认不拼 {platform}——预设名普遍自带平台，再拼会重复；预设名跨平台通用时再补。
+  // 渲染结果在全部预设间去重，同名解析期报错。
+  "artifacts": {
+    "prefix": "",
+    "build_naming": "{prefix}_{platform}_{target}",
+    "export_naming": "{prefix}_{preset}",
+    "retention": { "build": 7, "prefetch": 1, "export": 30, "contract": 1 } // 各类产物保留天数
+  },
+
+  // 扩展：manifest 指向项目侧清单。policy 缺省 off（省略整个 hooks 段同效），off 时清单不被读取；
+  // 要启用 = 显式改成 declared，并把清单里样例块的 run 指向项目仓库真实脚本（样例脚本不在模板内）。
+  // policy: off | declared
+  "hooks": { "manifest": ".github/ci-hooks.json", "policy": "off" },
+
+  // platforms：按平台覆写基线 platforms 段的字段（逐平台逐字段合并，未写字段沿用基线）。
+  // 可写字段：build_runner（构建作业 runner）/ export_runner（导出作业 runner）/
+  // editor_archive（导出用编辑器档案后缀）/ variants（构建变体）。
+  // 覆写 runner = 覆写产物最低运行环境（glibc / SDK 组合），项目自担。
+  // 典型用法：需要代码签名时把 export_runner 与 editor_archive 改成原生。
+  // 示例：
+  // "platforms": {
+  //   "macos": { "export_runner": "macos-26", "editor_archive": "macos.universal" }
+  // },
+  "platforms": {},
+
+  // roles：覆写基线 roles 段的链级作业 runner（publish / upload）。
+  // resolve 的 runner 不在此（schema 层面即不可覆写）。
+  "roles": {}
+}

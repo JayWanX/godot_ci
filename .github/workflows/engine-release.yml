@@ -1,0 +1,228 @@
+name: 🏗️ Engine Release
+
+# 引擎发布链：编译引擎并把产物固化为 Release 附件（引擎快照）。
+# 与 ~ 🚀 Project Release 的分工：project-release 固化项目成品（推 v* Tag 导出预设产物），
+# 本链固化引擎二进制：workflow_call 调 build.yml（契约 engine / build 段直接复用，零契约
+# 扩展），publish 下载全部编译 Artifact 并上传为 github.repository 的 Release 附件，
+# sha256 指纹写 GITHUB_STEP_SUMMARY。
+#
+# 职责分离（docs/ci-architecture.md）：Release 落点恒为 github.repository——项目仓库
+# 薄触发器调用时落项目仓库（引擎来源与构建配置全部来自调用方契约的 engine / build 段）。
+# 手动入口与 build.yml 对称：构建入参全部留空读契约，填了则覆盖契约——CI 仓库手动触发
+# 可用 remote: 来源声明编任意配方引擎并固化，Release 落触发仓库（与 template-release
+# 发布模板包同属 CI 自有内容 / 自有构建的发布）。
+#
+# 默认 tag「engine-snapshot」是布局常量；按引擎版本填 tag（如 4.7.2-stable）即多版本并存。
+#
+# 本链不接扩展链：无 resolve-hooks 作业、未注册任何锚点（hooks-anchors.json 无本链条目）；
+# 构建链自身的钩子仍随 build.yml 生效。也不调用 prune_release_assets.py：附件名来自
+# build_naming（不属于 export_naming 的产物家族），--clobber 已保证重跑幂等。
+on:
+  # 手动入口与 build.yml 对称：构建入参全部留空读调用方契约（项目薄触发器的常态），
+  # 填了则覆盖契约——CI 仓库手动触发可用 remote: 来源声明编任意配方引擎并固化。
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 发布到该 Tag 的 Release；--clobber 覆盖同名附件。按引擎版本填 tag（如 4.7.2-stable）即多版本并存。
+        required: false
+        default: engine-snapshot
+        type: string
+      engine-source:
+        description: 引擎来源 owner/repo[@ref]（如 godotengine/godot@4.7.2-stable）。留空读契约 engine.source；无契约时取 godotengine/godot。
+        required: false
+        default: ""
+        type: string
+      engine-ref:
+        description: 引擎引用（分支/tag/commit），覆盖 engine-source 里的 @ref。留空用 engine-source 的 @ref。
+        required: false
+        default: ""
+        type: string
+      target:
+        description: 构建目标 editor / template_debug / template_release，单值。留空读契约 engine.target。
+        required: false
+        default: ""
+        type: string
+      platform:
+        description: 构建平台，逗号分隔（如 linux,windows）。留空读契约 engine.platform；无契约时取全部平台。
+        required: false
+        default: ""
+        type: string
+      scons-flags:
+        description: 附加 SCons 标志（覆写契约 build.scons_flags）。
+        required: false
+        default: ""
+        type: string
+      profile:
+        description: 'SCons profile 来源覆写（local:<path> / remote:<owner/repo>[@<ref>][:<path>]）。留空读契约 build.paths.profile。'
+        required: false
+        default: ""
+        type: string
+      build-profile:
+        description: build profile（.gdbuild）来源覆写。留空读契约 build.paths.build_profile。
+        required: false
+        default: ""
+        type: string
+      custom-modules:
+        description: 自定义模块来源条目，逗号分隔（local:<path> / remote:<owner/repo>[@<ref>][:<path>]）。留空读契约 build.modules。
+        required: false
+        default: ""
+        type: string
+
+  workflow_call:
+    inputs:
+      tag:
+        description: 发布到该 Tag 的 Release；--clobber 覆盖同名附件。留空回落默认 tag engine-snapshot。
+        required: false
+        default: engine-snapshot
+        type: string
+      engine-source:
+        description: 引擎来源 owner/repo[@ref]。留空读契约 engine.source。
+        required: false
+        default: ""
+        type: string
+      engine-ref:
+        description: 引擎引用，覆盖 engine-source 里的 @ref。留空用 engine-source 的 @ref。
+        required: false
+        default: ""
+        type: string
+      target:
+        description: 构建目标，单值。留空读契约 engine.target。
+        required: false
+        default: ""
+        type: string
+      platform:
+        description: 构建平台，逗号分隔。留空读契约 engine.platform。
+        required: false
+        default: ""
+        type: string
+      scons-flags:
+        description: 附加 SCons 标志（覆写契约 build.scons_flags）。
+        required: false
+        default: ""
+        type: string
+      profile:
+        description: 'SCons profile 来源（local: / remote:）。留空读契约 build.paths.profile。'
+        required: false
+        default: ""
+        type: string
+      build-profile:
+        description: build profile（.gdbuild）来源。留空读契约 build.paths.build_profile。
+        required: false
+        default: ""
+        type: string
+      custom-modules:
+        description: 自定义模块来源条目，逗号分隔。留空读契约 build.modules。
+        required: false
+        default: ""
+        type: string
+      caller-uses-ref:
+        description: '调用方 uses: …@<ref> 里的 ref；resolve 期断言与契约 ci.ref / $schema URL 的 ref 段三者一致。'
+        required: false
+        default: ""
+        type: string
+    # 显式声明接收的 secret，调用方才能做自定义名映射（如 GIT_PAT: ${{ secrets.MY_PAT }}）。
+    # 不声明时调用方只能 secrets: inherit，无法改名——而改名正是私有仓库的常态。
+    secrets:
+      GIT_PAT:
+        description: "私有仓库访问令牌（检出引擎源码 / CI 资产）。"
+        required: false
+      ENCRYPTION_KEY:
+        description: "Godot PCK 加密密钥（十六进制）。空=不加密。"
+        required: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: engine-release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Chain Runner Bootstrap（workflows/runner.yml）：publish 作业的 runner 取基线
+  # roles.publish。本链无 resolve 作业，runner-json 仅被 publish 消费。
+  runner:
+    name: 引导链式运行器
+    uses: $/.github/workflows/runner.yml
+    secrets:
+      GIT_PAT: ${{ secrets.GIT_PAT }}
+
+  # 构建入参逐项透传：留空读契约（项目薄触发器的常态），填了则覆盖契约——覆盖语义与
+  # 覆盖优先级由 build.yml 自身的 resolve 归一化处理，本链不做任何再解释。
+  # force-upload 显式为 true：publish 作业要下载产物上传 Release。
+  build:
+    name: 编译引擎
+    uses: $/.github/workflows/build.yml
+    with:
+      engine-source: ${{ inputs.engine-source }}
+      engine-ref: ${{ inputs.engine-ref }}
+      target: ${{ inputs.target }}
+      platform: ${{ inputs.platform }}
+      scons-flags: ${{ inputs.scons-flags }}
+      profile: ${{ inputs.profile }}
+      build-profile: ${{ inputs.build-profile }}
+      custom-modules: ${{ inputs.custom-modules }}
+      force-upload: true
+      caller-uses-ref: ${{ inputs.caller-uses-ref }}
+    secrets: inherit
+
+  publish:
+    name: 发布引擎产物
+    needs: [runner, build]
+    runs-on: ${{ fromJSON(needs.runner.outputs.runner-json).publish }}
+    timeout-minutes: 15
+    steps:
+      - name: 检出 CI 资产
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ job.workflow_repository || github.repository }}
+          ref: ${{ job.workflow_sha || github.sha }}
+          token: ${{ secrets.GIT_PAT || github.token }}
+          path: ci-support
+          filter: blob:none
+          sparse-checkout: |
+            .github/actions/release-upload
+
+      # 编译 Artifact 的内容恒为 <artifact 名>.7z（package-artifact 的固定布局），按该
+      # 后缀收集附件：本链不知道产物名（名字由契约 build_naming 渲染、resolve 全局去重），
+      # 构建链的扩展包 artifact（hooks-bundle）内容非 .7z，被天然排除。
+      - name: 下载引擎产物
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: engine-artifacts
+
+      # 附件收集：仅 *.7z 进入平铺目录（hooks-bundle 等扩展包内容非 .7z，天然排除），
+      # 源目录保持分 artifact 布局供指纹步复用
+      - name: 收集引擎产物
+        shell: bash
+        run: |
+          mkdir -p engine-flat
+          mapfile -t FILES < <(find engine-artifacts -type f -name '*.7z' | sort)
+          if [ "${#FILES[@]}" -eq 0 ]; then
+            echo "::error::构建产物里没有 *.7z 文件（编译链未上传产物？）"
+            exit 1
+          fi
+          for f in "${FILES[@]}"; do cp "$f" engine-flat/; done
+
+      - name: 上传附件到 Release
+        uses: ./ci-support/.github/actions/release-upload
+        with:
+          tag: ${{ inputs.tag }}
+          assets-dir: engine-flat
+          create-notes: "CI 编译的引擎产物快照（engine-release 链）；附件 sha256 见本次运行的 Summary"
+
+      # sha256 指纹写 run summary：逐附件列出大小与指纹，供外部台账按附件名回填
+      - name: 输出产物指纹
+        shell: bash
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          {
+            echo "## 引擎产物指纹（Release $INPUT_TAG）"
+            echo
+            echo "| 附件 | 大小（字节） | sha256 |"
+            echo "| --- | --- | --- |"
+            mapfile -t SUMMARY_FILES < <(find engine-artifacts -type f -name '*.7z' | sort)
+            for f in "${SUMMARY_FILES[@]}"; do
+              printf '| %s | %s | %s |\n' "$(basename "$f")" "$(stat -c%s "$f")" "$(sha256sum "$f" | cut -d' ' -f1)"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"

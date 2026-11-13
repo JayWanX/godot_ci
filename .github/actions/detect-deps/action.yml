@@ -1,0 +1,53 @@
+name: 探测构建依赖
+description: 按 profile.py 与 scons-flags 计算本次构建需要的可选 SDK。
+inputs:
+  platform:
+    description: 目标平台（契约平台名：linux, windows, macos, android, ios, visionos, web）。
+    required: true
+    type: string
+  scons-profile-path:
+    description: 解析后的 profile.py 绝对路径；空则仅按 scons-flags 与默认值判定。
+    required: false
+    default: ""
+    type: string
+  scons-flags:
+    description: 调用方追加的 SCons 标志；覆盖 profile.py 同名标志。空=无。
+    required: false
+    default: ""
+    type: string
+outputs:
+  need-d3d12:
+    description: 需要 D3D12 SDK 时为 true。
+    value: ${{ steps.detect-deps.outputs.need-d3d12 }}
+  need-angle:
+    description: 需要 ANGLE 时为 true。
+    value: ${{ steps.detect-deps.outputs.need-angle }}
+  need-winrt:
+    description: 需要 WinRT 组件时为 true。
+    value: ${{ steps.detect-deps.outputs.need-winrt }}
+  need-accesskit:
+    description: 需要 AccessKit 时为 true。
+    value: ${{ steps.detect-deps.outputs.need-accesskit }}
+  need-vulkan:
+    description: 需要 Vulkan SDK 时为 true。
+    value: ${{ steps.detect-deps.outputs.need-vulkan }}
+  need-mingw:
+    description: 需要 POSIX 线程版 MinGW 时为 true。
+    value: ${{ steps.detect-deps.outputs.need-mingw }}
+runs:
+  using: composite
+  steps:
+    - name: 探测依赖
+      id: detect-deps
+      shell: bash
+      env:
+        INPUT_PLATFORM: ${{ inputs.platform }}
+        INPUT_SCONS_PROFILE_PATH: ${{ inputs.scons-profile-path }}
+        INPUT_SCONS_FLAGS: ${{ inputs.scons-flags }}
+      run: |
+        out="$(python "$GITHUB_ACTION_PATH/../../scripts/resolve_scons_flags.py" \
+          --platform "$INPUT_PLATFORM" \
+          --profile "${INPUT_SCONS_PROFILE_PATH:-}" \
+          --scons-flags "${INPUT_SCONS_FLAGS:-}" --mode detect)"
+        echo "$out"
+        printf '%s\n' "$out" >> "$GITHUB_OUTPUT"

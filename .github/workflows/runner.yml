@@ -1,0 +1,47 @@
+name: ~ 🚦 Chain Runner Bootstrap
+
+# 读平台基线 roles 段并输出 runner-json，供「先于契约可读」的作业消费：
+# 各链的 resolve 作业、self-check 与 prefetch（这些作业的 runner 分配早于契约可读，
+# 故契约 schema 的 roles 段不含 resolve 键）；也供无 resolve 作业的链级发布作业消费
+# （template-release / engine-release 的 publish 直读 roles.publish）。本文件是全系统
+# 唯一允许 runs-on 字面量的工作流——读基线前不存在任何数据源，ubuntu-latest 是唯一的
+# 引导常量（check_ci_assets.py 的 runs-on 防回潮规则按文件名豁免本文件）。
+
+on:
+  workflow_call:
+    outputs:
+      runner-json:
+        description: 平台基线运行器映射的紧凑 JSON。
+        value: ${{ jobs.runner.outputs.runner-json }}
+    secrets:
+      GIT_PAT:
+        description: "私有 CI 资产仓库访问令牌。"
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  runner:
+    name: 读基线运行器
+    runs-on: ubuntu-latest # 仲裁引导：见文件头注释
+    timeout-minutes: 5
+    outputs:
+      runner-json: ${{ steps.baseline.outputs.runner-json }}
+    steps:
+      - name: 检出 CI 资产
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ job.workflow_repository || github.repository }}
+          ref: ${{ job.workflow_sha || github.sha }}
+          token: ${{ secrets.GIT_PAT || github.token }}
+          path: ci-support
+          filter: blob:none
+          sparse-checkout: |
+            .github/contract
+            .github/scripts
+
+      - name: 输出基线运行器映射
+        id: baseline
+        shell: bash
+        run: python ci-support/.github/scripts/runner_baseline.py >> "$GITHUB_OUTPUT"

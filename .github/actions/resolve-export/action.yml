@@ -1,0 +1,283 @@
+name: 解析导出参数
+description: >-
+  从 ci-contract.json 与界面输入解析导出参数（经 godot_context.py 契约归一化），
+  产出 context.json 供钩子消费，输出供下游 export-platform / build.yml 使用。
+
+inputs:
+  project:
+    description: 待导出项目来源声明 remote:<owner/repo>[@<ref>]；留空=导出本仓库。
+    required: false
+    default: ""
+  presets:
+    description: 要导出的预设名，逗号分隔（覆写契约 export.presets）。
+    required: false
+    default: ""
+  export-type:
+    description: 导出类型（覆写契约 export.type）。
+    required: false
+    default: ""
+  editor-version:
+    description: 官方编辑器版本（覆写契约 export.editor_version）。
+    required: false
+    default: ""
+  scons-flags:
+    description: 编译导出模板时的附加 SCons 标志（覆写契约 build.scons_flags）；仅 custom_build 生效。
+    required: false
+    default: ""
+  profile:
+    description: 编译导出模板时的 SCons profile 来源覆写（覆写契约 build.paths.profile）；仅 custom_build 生效。
+    required: false
+    default: ""
+  build-profile:
+    description: 编译导出模板时的 build profile 来源覆写（覆写契约 build.paths.build_profile）；仅 custom_build 生效。
+    required: false
+    default: ""
+  caller-uses-ref:
+    description: '调用方 uses: …@<ref> 里的 ref；resolve 期断言与契约 ci.ref / $schema URL 的 ref 段三者一致。'
+    required: false
+    default: ""
+  repo-token:
+    description: 访问私有项目仓库的令牌（由调用方传 secrets.GIT_PAT）。
+    required: false
+    default: ""
+
+outputs:
+  presets:
+    description: 解析后的预设列表（逗号分隔）。
+    value: ${{ steps.resolve.outputs.presets }}
+  export-type:
+    description: 解析后的导出类型。
+    value: ${{ steps.resolve.outputs.export-type }}
+  upload-artifacts:
+    description: 是否上传产物。
+    value: ${{ steps.resolve.outputs.upload-artifacts }}
+  template-platforms:
+    description: 需要模板的平台（逗号分隔）。
+    value: ${{ steps.resolve.outputs.template-platforms }}
+  engine-source:
+    description: 引擎来源 owner/repo@ref。
+    value: ${{ steps.resolve.outputs.engine-source }}
+  engine-ref:
+    description: 引擎 ref。
+    value: ${{ steps.resolve.outputs.engine-ref }}
+  engine-sha:
+    description: 引擎 commit SHA。
+    value: ${{ steps.resolve.outputs.engine-sha }}
+  editor-version:
+    description: 官方编辑器版本。
+    value: ${{ steps.resolve.outputs.editor-version }}
+  repo-safe:
+    description: 项目仓库名安全形式（产物名前缀）。
+    value: ${{ steps.resolve.outputs.repo-safe }}
+  presets-windows:
+    description: Windows 平台的预设名（逗号分隔）。
+    value: ${{ steps.resolve.outputs.presets-windows }}
+  presets-linux:
+    description: Linux 平台的预设名（逗号分隔）。
+    value: ${{ steps.resolve.outputs.presets-linux }}
+  presets-macos:
+    description: macOS 平台的预设名（逗号分隔）。
+    value: ${{ steps.resolve.outputs.presets-macos }}
+  presets-web:
+    description: Web 平台的预设名（逗号分隔）。
+    value: ${{ steps.resolve.outputs.presets-web }}
+  presets-android:
+    description: Android 平台的预设名（逗号分隔）。
+    value: ${{ steps.resolve.outputs.presets-android }}
+  presets-ios:
+    description: iOS 平台的预设名（逗号分隔）。
+    value: ${{ steps.resolve.outputs.presets-ios }}
+  presets-visionos:
+    description: visionOS 平台的预设名（逗号分隔）。
+    value: ${{ steps.resolve.outputs.presets-visionos }}
+  packages-windows:
+    description: Windows 平台的预设打包矩阵 JSON（[{preset, preset-safe, package}]）。
+    value: ${{ steps.resolve.outputs.packages-windows }}
+  packages-linux:
+    description: Linux 平台的预设打包矩阵 JSON。
+    value: ${{ steps.resolve.outputs.packages-linux }}
+  packages-macos:
+    description: macOS 平台的预设打包矩阵 JSON。
+    value: ${{ steps.resolve.outputs.packages-macos }}
+  packages-web:
+    description: Web 平台的预设打包矩阵 JSON。
+    value: ${{ steps.resolve.outputs.packages-web }}
+  packages-android:
+    description: Android 平台的预设打包矩阵 JSON。
+    value: ${{ steps.resolve.outputs.packages-android }}
+  packages-ios:
+    description: iOS 平台的预设打包矩阵 JSON。
+    value: ${{ steps.resolve.outputs.packages-ios }}
+  packages-visionos:
+    description: visionOS 平台的预设打包矩阵 JSON。
+    value: ${{ steps.resolve.outputs.packages-visionos }}
+  export-complete:
+    description: 本轮选中的预设是否覆盖 cfg 全部预设（true 才允许清理 Release 陈旧附件）。
+    value: ${{ steps.resolve.outputs.export-complete }}
+  templates-pattern-windows:
+    description: Windows 自编译模板产物的下载 pattern（由契约 artifacts.build_naming 渲染）。
+    value: ${{ steps.resolve.outputs.templates-pattern-windows }}
+  templates-pattern-linux:
+    description: Linux 自编译模板产物的下载 pattern。
+    value: ${{ steps.resolve.outputs.templates-pattern-linux }}
+  templates-pattern-macos:
+    description: macOS 自编译模板产物的下载 pattern。
+    value: ${{ steps.resolve.outputs.templates-pattern-macos }}
+  templates-pattern-web:
+    description: Web 自编译模板产物的下载 pattern。
+    value: ${{ steps.resolve.outputs.templates-pattern-web }}
+  templates-pattern-android:
+    description: Android 自编译模板产物的下载 pattern。
+    value: ${{ steps.resolve.outputs.templates-pattern-android }}
+  templates-pattern-ios:
+    description: iOS 自编译模板产物的下载 pattern。
+    value: ${{ steps.resolve.outputs.templates-pattern-ios }}
+  templates-pattern-visionos:
+    description: visionOS 自编译模板产物的下载 pattern。
+    value: ${{ steps.resolve.outputs.templates-pattern-visionos }}
+  project-repo:
+    description: 待导出项目仓库。
+    value: ${{ steps.resolve.outputs.project-repo }}
+  profile:
+    description: SCons profile 来源声明（契约 build.paths.profile，编译导出模板时透传）。
+    value: ${{ steps.resolve.outputs.profile }}
+  build-profile:
+    description: build profile（.gdbuild）来源声明（契约 build.paths.build_profile，编译导出模板时透传）。
+    value: ${{ steps.resolve.outputs.build-profile }}
+  project-ref:
+    description: 待导出项目 ref。
+    value: ${{ steps.resolve.outputs.project-ref }}
+  external-project:
+    description: 是否外部项目（仓库/ref 与触发仓库不同）；build-templates 据此决定是否传 project。
+    value: ${{ steps.resolve.outputs.external-project }}
+  contract-path:
+    description: 实际读取的契约路径（外部项目为克隆目录内）。
+    value: ${{ steps.resolve.outputs.contract-path }}
+  project-root:
+    description: 项目仓库根（外部项目为克隆目录）。
+    value: ${{ steps.resolve.outputs.project-root }}
+  retention-export:
+    description: 导出产物保留天数。
+    value: ${{ steps.resolve.outputs.retention-export }}
+  retention-prefetch:
+    description: 预取产物（编辑器与导出模板）保留天数。
+    value: ${{ steps.resolve.outputs.retention-prefetch }}
+  retention-contract:
+    description: 契约与上下文中转件保留天数。
+    value: ${{ steps.resolve.outputs.retention-contract }}
+  runner-json:
+    description: 平台基线运行器映射 JSON。
+    value: ${{ steps.resolve.outputs.runner-json }}
+  platforms-json:
+    description: 平台配置 JSON（平台 → {build_runner, export_runner, editor_archive, variants}，含契约覆写）。
+    value: ${{ steps.resolve.outputs.platforms-json }}
+  editor-archives-matrix:
+    description: 编辑器档案的 matrix-include 形态 JSON（[{key,platform}]，prefetch job 的 strategy.matrix.include 数据源）。
+    value: ${{ steps.resolve.outputs.editor-archives-matrix }}
+  scons-flags:
+    description: 契约归一化的附加 SCons 标志。
+    value: ${{ steps.resolve.outputs.scons-flags }}
+  artifact-prefix:
+    description: 产物名前缀（契约 artifacts.prefix，空则取仓库名安全形式）。
+    value: ${{ steps.resolve.outputs.artifact-prefix }}
+  artifact-build-naming:
+    description: 编译产物命名模板（契约 artifacts.build_naming；渲染自编译模板的下载 pattern）。
+    value: ${{ steps.resolve.outputs.artifact-build-naming }}
+  artifact-export-naming:
+    description: 导出产物命名模板（契约 artifacts.export_naming）。
+    value: ${{ steps.resolve.outputs.artifact-export-naming }}
+  project-godot:
+    description: Godot 项目配置文件相对项目根的路径（契约 export.paths.project_godot）。
+    value: ${{ steps.resolve.outputs.project-godot }}
+  export-presets-path:
+    description: 导出预设文件相对项目根的路径（契约 export.paths.export_presets）。
+    value: ${{ steps.resolve.outputs.export-presets-path }}
+  dist-dir:
+    description: 导出产物目录相对项目根的路径（契约 export.paths.dist）。
+    value: ${{ steps.resolve.outputs.dist-dir }}
+  ci-repository:
+    description: CI 资产仓库 owner/repo（契约 ci.repository；单仓自用为空，消费方从本次运行所属仓库检出）。
+    value: ${{ steps.resolve.outputs.ci-repository }}
+  ci-ref:
+    description: CI 资产仓库 ref（契约 ci.ref；单仓自用为空）。
+    value: ${{ steps.resolve.outputs.ci-ref }}
+  hooks-manifest:
+    description: 扩展清单路径。
+    value: ${{ steps.resolve.outputs.hooks-manifest }}
+  hooks-policy:
+    description: 扩展策略 off|declared。
+    value: ${{ steps.resolve.outputs.hooks-policy }}
+  hooks-bundle:
+    description: 扩展包 artifact 名（空=未启用）。
+    value: ${{ steps.bundle.outputs.hooks-bundle }}
+  hooks-sha:
+    description: 扩展包摘要（空=未启用）。
+    value: ${{ steps.bundle.outputs.hooks-sha }}
+
+runs:
+  using: composite
+  steps:
+    - name: 解析导出参数
+      id: resolve
+      shell: bash
+      env:
+        INPUT_PROJECT: ${{ inputs.project }}
+        INPUT_PRESETS: ${{ inputs.presets }}
+        INPUT_EXPORT_TYPE: ${{ inputs.export-type }}
+        INPUT_EDITOR_VERSION: ${{ inputs.editor-version }}
+        INPUT_SCONS_FLAGS: ${{ inputs.scons-flags }}
+        INPUT_PROFILE: ${{ inputs.profile }}
+        INPUT_BUILD_PROFILE: ${{ inputs.build-profile }}
+        INPUT_REPO_TOKEN: ${{ inputs.repo-token }}
+        CALLER_USES_REF: ${{ inputs.caller-uses-ref }}
+        CURRENT_REPO: ${{ github.repository }}
+        CURRENT_SHA: ${{ github.sha }}
+        GITHUB_REPOSITORY: ${{ github.repository }}
+        GITHUB_SHA: ${{ github.sha }}
+      run: python "$GITHUB_ACTION_PATH/scripts/resolve_export.py"
+
+    - name: 生成运行时上下文
+      shell: bash
+      env:
+        CI_CONTRACT: ${{ steps.resolve.outputs.contract-path }}
+        ENGINE_SHA: ${{ steps.resolve.outputs.engine-sha }}
+        # resolve 期为多平台批：platform / target 置 null（不过滤，hook_matches 与
+        # on.platform 省略同构）；本 job 工作区无引擎源码，ENGINE_ROOT 不设置（= 空）
+        PROJECT_ROOT: ${{ steps.resolve.outputs.project-root }}
+        REPO_SAFE: ${{ steps.resolve.outputs.repo-safe }}
+        GITHUB_REPOSITORY: ${{ github.repository }}
+        GITHUB_SHA: ${{ github.sha }}
+        GITHUB_REF_NAME: ${{ github.ref_name }}
+        GITHUB_RUN_ID: ${{ github.run_id }}
+        GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
+        GITHUB_EVENT_NAME: ${{ github.event_name }}
+        GITHUB_WORKSPACE: ${{ github.workspace }}
+        RUNNER_OS: ${{ runner.os }}
+        CALLER_USES_REF: ${{ inputs.caller-uses-ref }}
+        # 本次实际导出的预设名单（resolve 归一化值；validate 期 context 用）
+        EXPORT_PRESETS_ACTUAL: ${{ steps.resolve.outputs.presets }}
+      run: |
+        python "$GITHUB_ACTION_PATH/../../scripts/godot_context.py" \
+          --resolve --chain export \
+          --out context.json
+
+    - name: 校验并打包扩展清单
+      id: bundle
+      shell: bash
+      env:
+        HOOKS_MANIFEST: ${{ steps.resolve.outputs.hooks-manifest }}
+        HOOKS_POLICY: ${{ steps.resolve.outputs.hooks-policy }}
+      run: |
+        python "$GITHUB_ACTION_PATH/../../scripts/run_hooks.py" validate \
+          --manifest "$HOOKS_MANIFEST" --policy "$HOOKS_POLICY" \
+          --chain export --context context.json \
+          --out plan.json --bundle-out hooks-bundle
+
+    - name: 上传扩展包
+      if: steps.bundle.outputs.hooks-bundle != ''
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: ${{ steps.bundle.outputs.hooks-bundle }}
+        path: hooks-bundle/
+        if-no-files-found: error
+        retention-days: ${{ steps.resolve.outputs.retention-contract }}

@@ -1,0 +1,24 @@
+name: 上传产物
+description: 上传 Godot 构建产物。
+
+inputs:
+  artifact-name:
+    description: 产物名称。
+    default: ""
+  artifact-path:
+    description: 要上传的路径。
+    required: true
+    default: bin/*
+  retention-days:
+    description: 产物保留天数（GitHub 默认 90）；编译产物同一次 run 内消费，默认 7 天。
+    default: 7
+
+runs:
+  using: composite
+  steps:
+    - name: 上传产物
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: ${{ inputs.artifact-path }}
+        retention-days: ${{ inputs.retention-days }}

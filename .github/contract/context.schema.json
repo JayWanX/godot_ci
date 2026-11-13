@@ -1,0 +1,224 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Godot CI 运行时上下文",
+  "description": "由 resolve 归一化契约+基线生成，只读挂载 + 只读 env 前缀 GODOT_CONTEXT_*。只服务钩子，不服务 CI 本体。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "chain",
+    "platform",
+    "target",
+    "engine",
+    "project",
+    "paths",
+    "cache",
+    "artifacts",
+    "runner",
+    "run"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "godot.ci/hook-context",
+      "description": "类型标识，不是版本兼容层"
+    },
+    "chain": {
+      "type": "string",
+      "enum": ["build", "export", "release"],
+      "description": "本次执行的链"
+    },
+    "platform": {
+      "type": ["string", "null"],
+      "description": "当前平台 id；多平台批的 resolve 期与 release 链为 null（= 不过滤，与 on.platform 省略同构），单平台 job 期为单值"
+    },
+    "target": {
+      "type": ["string", "null"],
+      "description": "编译目标档位；null 语义同 platform"
+    },
+    "arch": {
+      "type": "string",
+      "description": "架构；平台有默认架构时填充"
+    },
+    "engine": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repo", "ref", "sha"],
+      "description": "本次使用的引擎",
+      "properties": {
+        "repo": {
+          "type": "string",
+          "description": "引擎仓库 owner/repo"
+        },
+        "ref": {
+          "type": "string",
+          "description": "引擎 ref（分支/tag/SHA）"
+        },
+        "sha": {
+          "type": "string",
+          "description": "已解析的引擎 commit SHA；无法解析时为空串（导出链 resolve 期不解析 SHA，空值即『未解析』这一事实）"
+        }
+      }
+    },
+    "project": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repo", "ref", "root"],
+      "description": "本次构建的项目",
+      "properties": {
+        "repo": {
+          "type": "string",
+          "description": "项目仓库 owner/repo"
+        },
+        "ref": {
+          "type": "string",
+          "description": "项目 ref"
+        },
+        "root": {
+          "type": "string",
+          "description": "项目检出根的绝对路径"
+        }
+      }
+    },
+    "export": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "导出参数（export / release 链填充）",
+      "properties": {
+        "type": {
+          "type": "string",
+          "description": "导出模式（归一化后）"
+        },
+        "editor_version": {
+          "type": "string",
+          "description": "官方编辑器版本"
+        },
+        "presets": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "本次导出的预设名单"
+        },
+        "current_preset": {
+          "type": "string",
+          "description": "逐预设锚点 export-preset-each 的当前预设名（dispatch --current-preset 注入）；整批锚点与其余链缺省"
+        }
+      }
+    },
+    "paths": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "运行期路径；空值 = 该项未配置",
+      "properties": {
+        "engine_root": {
+          "type": "string",
+          "description": "引擎源码根"
+        },
+        "profile": {
+          "type": ["string", "null"],
+          "description": "SCons profile 脚本路径"
+        },
+        "build_profile": {
+          "type": ["string", "null"],
+          "description": "build profile（.gdbuild）路径"
+        },
+        "modules_dir": {
+          "type": ["string", "null"],
+          "description": "自定义模块目录"
+        },
+        "dist": {
+          "type": ["string", "null"],
+          "description": "导出产物目录"
+        },
+        "export_presets": {
+          "type": "string",
+          "description": "导出预设文件路径"
+        }
+      }
+    },
+    "cache": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "构建链缓存相关值；resolve 期部分字段为空，运行期中间量由 hooks-result.json 承载。缓存键本体是各 job 的 env 中间量，不进 context",
+      "properties": {
+        "config_hash": {
+          "type": "string",
+          "description": "配置哈希（编译选项变化即变）"
+        },
+        "source_hash": {
+          "type": "string",
+          "description": "源哈希（补丁 / 模块内容变化即变）"
+        },
+        "scons_flags_base": {
+          "type": "string",
+          "description": "基准 SCons 标志（扩展合并前的底值）"
+        }
+      }
+    },
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "产物命名与保留策略",
+      "properties": {
+        "prefix": {
+          "type": "string",
+          "description": "产物名前缀"
+        },
+        "build_naming": {
+          "type": "string",
+          "description": "编译产物命名模板"
+        },
+        "export_naming": {
+          "type": "string",
+          "description": "导出产物（交付包 / Release 附件）命名模板"
+        },
+        "retention": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "保留天数（build / prefetch / export / contract）；取值源是契约 artifacts.retention（schema default 补齐）",
+          "properties": {
+            "build": { "type": "integer", "minimum": 1 },
+            "prefetch": { "type": "integer", "minimum": 1 },
+            "export": { "type": "integer", "minimum": 1 },
+            "contract": { "type": "integer", "minimum": 1 }
+          }
+        }
+      }
+    },
+    "runner": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "执行机信息",
+      "properties": {
+        "os": {
+          "type": "string",
+          "description": "runner 系统"
+        },
+        "workspace": {
+          "type": "string",
+          "description": "runner 工作区路径"
+        }
+      }
+    },
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "本次运行标识",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "GitHub run id"
+        },
+        "attempt": {
+          "type": "integer",
+          "description": "重试序号"
+        },
+        "event": {
+          "type": "string",
+          "description": "触发事件名"
+        }
+      }
+    }
+  }
+}
